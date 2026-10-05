@@ -4,6 +4,12 @@ hawley-translator Cloudflare Worker, and queue drafts for HUMAN REVIEW.
 
 Scope: post caption + text visible in images (no video transcription).
 
+Media: every image is downloaded and burned with a translation watermark
+("非官方中文翻譯 · @snhawleytranslatorhkunofficial"); videos/reels are
+downloaded in full via yt-dlp (IG publishing requires the file — a URL is
+not enough) and watermarked with ffmpeg. Originals are kept as src* files;
+the watermarked img*/clip* files are what gets published.
+
 OCR engine: PaddleOCR PP-OCRv5 — the SAME engine realufo.org's crawler uses
 (crawler/ingest/ocr.py: PP-OCRv5_mobile_det + en_PP-OCRv5_mobile_rec @ score
 threshold 0.5). It runs here on the VM (PaddleOCR can't run inside a
@@ -23,8 +29,10 @@ State lives under STATE_DIR (default: the goal's hidden_files dir):
   review_queue.json   - list of draft dicts awaiting review
   images/<shortcode>/ - downloaded media for each queued draft
 
-Requires: instagram-cli (linked account, read-only use), yt-dlp (fallback
-for reel poster images). Env: HAWLEY_TRANSLATOR_URL=https://<worker>.workers.dev
+Requires: instagram-cli (linked account, read-only use), yt-dlp (video
+downloads + reel poster fallback), ffmpeg (video watermark), Pillow (image
+watermark), and a CJK font (Noto Sans CJK). Env:
+HAWLEY_TRANSLATOR_URL=https://<worker>.workers.dev
 """
 
 import argparse
@@ -204,6 +212,55 @@ def download(url, dest_path):
         f.write(r.read())
 
 
+# Watermark burned into every published image/video: marks the repost as an
+# unofficial translation. Originals are kept as src* files (never published).
+WATERMARK_TEXT = "非官方中文翻譯 · @snhawleytranslatorhkunofficial"
+WATERMARK_FONT_TTC = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+WATERMARK_FONT_INDEX = 4  # Noto Sans CJK HK inside the .ttc
+
+
+def _cjk_font(size):
+    from PIL import ImageFont
+    try:
+        return ImageFont.truetype(WATERMARK_FONT_TTC, size, index=WATERMARK_FONT_INDEX)
+    except Exception:
+        return ImageFont.truetype(WATERMARK_FONT_TTC, size)  # first face fallback
+
+
+def watermark_image(src_path, dest_path, text=WATERMARK_TEXT):
+    """Bottom bar, semi-transparent black, white CJK text. Raises on failure."""
+    from PIL import Image, ImageDraw
+    im = Image.open(src_path).convert("RGBA")
+    w, h = im.size
+    bar_h = max(28, int(h * 0.075))
+    overlay = Image.new("RGBA", (w, bar_h), (0, 0, 0, 140))
+    im.paste(overlay, (0, h - bar_h), overlay)
+    draw = ImageDraw.Draw(im)
+    font = _cjk_font(max(14, int(w * 0.032)))
+    while draw.textlength(text, font=font) > w * 0.94 and font.size > 10:
+        font = _cjk_font(font.size - 2)
+    tw = draw.textlength(text, font=font)
+    draw.text(((w - tw) / 2, h - bar_h + (bar_h - font.size) / 2 - 2),
+              text, font=font, fill=(255, 255, 255, 235))
+    im.convert("RGB").save(dest_path, quality=92)
+
+
+def download_video(post_url, dest_path):
+    """Full mp4 via yt-dlp. Raises RuntimeError on failure."""
+    run(["yt-dlp", "-o", dest_path, "--no-warnings", "--no-playlist",
+         "-f", "mp4", "--merge-output-format", "mp4", post_url], timeout=600)
+
+
+def watermark_video(src_path, dest_path, text=WATERMARK_TEXT):
+    """Burn the watermark into the video with ffmpeg drawtext. Raises."""
+    safe = text.replace("\\", "\\\\").replace(":", "\\:").replace("'", "")
+    vf = (f"drawtext=fontfile={WATERMARK_FONT_TTC}:text='{safe}':"
+          f"fontsize=h/28:x=(w-text_w)/2:y=h-text_h-20:"
+          f"fontcolor=white:box=1:boxcolor=black@0.55:boxborderw=12")
+    run(["ffmpeg", "-y", "-v", "error", "-i", src_path,
+         "-vf", vf, "-c:a", "copy", dest_path], timeout=600)
+
+
 def translate(worker_url, caption, image_texts, image_urls=()):
     """POST pre-OCR'd texts to the Worker; it returns the translations.
 
@@ -288,18 +345,50 @@ def main():
             if not media_urls:
                 log("  no fetchable media URL — caption-only draft")
 
-            # download media for the local review archive
+            # download + watermark media. Originals kept as src* (never
+            # published); the watermarked img*/clip* files are what gets
+            # published after review.
             img_dir = os.path.join(args.state_dir, "images", shortcode)
             os.makedirs(img_dir, exist_ok=True)
-            local_paths = []
+            local_paths, src_paths = [], []
+            wm_status = "n/a"
             for i, mu in enumerate(media_urls):
                 ext = ".png" if ".png" in mu.split("?")[0] else ".jpg"
+                src = os.path.join(img_dir, f"src{i}{ext}")
                 dest = os.path.join(img_dir, f"img{i}{ext}")
                 try:
-                    download(mu, dest)
-                    local_paths.append(os.path.relpath(dest, args.state_dir))
+                    download(mu, src)
+                    src_paths.append(os.path.relpath(src, args.state_dir))
+                    try:
+                        watermark_image(src, dest)
+                        local_paths.append(os.path.relpath(dest, args.state_dir))
+                        wm_status = "ok"
+                    except Exception as e:
+                        log(f"  watermark failed for image {i}: {e}")
+                        local_paths.append(os.path.relpath(src, args.state_dir))
+                        wm_status = "failed"
                 except Exception as e:
                     log(f"  download failed for image {i}: {e}")
+
+            # videos/reels: download the full mp4 (IG publishing needs the
+            # file — a URL is not enough) and burn in the watermark.
+            video_path, video_src, video_wm = "", "", "n/a"
+            if str(media_type).lower() in ("video", "reel") and post_url:
+                vsrc = os.path.join(img_dir, "clip_src.mp4")
+                vdest = os.path.join(img_dir, "clip.mp4")
+                try:
+                    download_video(post_url, vsrc)
+                    video_src = os.path.relpath(vsrc, args.state_dir)
+                    try:
+                        watermark_video(vsrc, vdest)
+                        video_path = os.path.relpath(vdest, args.state_dir)
+                        video_wm = "ok"
+                        log(f"  video downloaded + watermarked")
+                    except Exception as e:
+                        log(f"  video watermark failed: {e}")
+                        video_path, video_wm = video_src, "failed"
+                except Exception as e:
+                    log(f"  video download failed: {e}")
 
             # OCR with PaddleOCR (same engine as realufo.org's crawler)
             image_texts = []
@@ -335,6 +424,11 @@ def main():
                 "caption_zh": result.get("caption_zh", ""),
                 "image_texts": result.get("image_texts", []),
                 "image_local_paths": local_paths,
+                "image_src_paths": src_paths,
+                "watermark": wm_status,
+                "video_local_path": video_path,
+                "video_src_path": video_src,
+                "video_watermark": video_wm,
                 "warnings": result.get("warnings", []),
                 "queued_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             }

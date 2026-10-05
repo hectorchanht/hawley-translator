@@ -1,4 +1,5 @@
 yt-dlp>=2024.1.1
+Pillow>=10.0.0  # image watermark (burned-in translation credit)
 # PaddleOCR — the SAME OCR engine realufo.org's crawler uses (PP-OCRv5).
 # Pinned to realufo's versions (crawler/ingest/requirements-ocr.txt).
 # Heavy (~2 GB with paddlepaddle): install into the dedicated venv, not system python:

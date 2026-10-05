@@ -58,8 +58,11 @@ Data flow per new post:
 4. **Translate** — caption + OCR'd texts are POSTed to the Worker's
    `/translate`, which returns Traditional Chinese (HK 書面語，霍利 for
    Hawley, @mentions/#hashtags kept, line breaks preserved).
-5. **Queue** — media is downloaded locally, the draft (EN + ZH + OCR results +
-   warnings) is appended to `review_queue.json`, the watermark advances.
+5. **Queue** — media is downloaded and watermarked (images: PIL bottom bar;
+   videos: full mp4 via yt-dlp + ffmpeg drawtext burn-in; originals kept as
+   `src*`, watermarked `img*`/`clip*` is what gets published), the draft
+   (EN + ZH + OCR results + warnings) is appended to `review_queue.json`,
+   the watermark advances.
 
 ## Deploy the Worker
 
