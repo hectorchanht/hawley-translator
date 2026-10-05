@@ -39,6 +39,8 @@
  *       { "url": "…", "text_en": "…", "text_zh": "翻譯…" }
  *     ],
  *     "segments_zh": [ { "i": 0, "text_zh": "翻譯…" } ],
+ *     "seo_hook_zh": "IG 開場 hook…",
+ *     "seo_hashtags": ["#霍利", "#JoshHawley", …],
  *     "warnings": ["…"]   // empty when everything worked
  *   }
  *
@@ -58,6 +60,12 @@ const SOURCE_NAME_RULES = {
   hawley: '- Render "Josh Hawley" / "Hawley" / "Senator Hawley" as 霍利 / 霍利參議員.',
   trump:
     '- Render "Donald Trump" / "Trump" / "President Trump" as 特朗普 / 特朗普總統.',
+};
+
+// The one hashtag every post for that source must carry (SEO anchor tag).
+const SOURCE_MAIN_TAG = {
+  hawley: "#霍利",
+  trump: "#特朗普",
 };
 
 function extractJson(raw) {
@@ -97,6 +105,7 @@ async function ocrImage(env, url) {
 
 function buildTranslationPrompt(caption, imageTexts, segments, source) {
   const nameRule = SOURCE_NAME_RULES[source] || "";
+  const mainTag = SOURCE_MAIN_TAG[source] || "#翻譯";
   const parts = [
     "You are a professional translator writing for a Hong Kong audience.",
     "Translate the English content below into Traditional Chinese, Hong Kong written style (書面語，繁體中文).",
@@ -111,9 +120,17 @@ function buildTranslationPrompt(caption, imageTexts, segments, source) {
     "- SPEECH segments become burned-in video subtitles: keep each one short " +
       "(one line, under 20 Chinese characters when possible), Cantonese-flavoured " +
       "where natural (嘅, 咁, 係, 唔), faithful to the spoken meaning.",
+    "- SEO: also produce:",
+    '  - "seo_hook_zh": one punchy Instagram opening line (under 50 Chinese characters, ' +
+      "Cantonese-flavoured, may start with ONE emoji), capturing the most newsworthy point.",
+    '  - "seo_hashtags": 5-8 hashtags as JSON strings, each starting with #. Mix Traditional ' +
+      `Chinese tags (e.g. ${mainTag}) and English tags (e.g. #JoshHawley). Always include ${mainTag}. ` +
+      "Topical and HK-audience relevant; never generic spam like #love or #instagood.",
     "",
     "Return ONLY valid JSON, no markdown fences, with this exact shape:",
-    '{"caption_zh": "...", "image_texts_zh": ["...", "..."], "segments_zh": [{"i": 0, "text_zh": "..."}]}',
+    '{"caption_zh": "...", "image_texts_zh": ["...", "..."], ' +
+      '"segments_zh": [{"i": 0, "text_zh": "..."}], ' +
+      '"seo_hook_zh": "...", "seo_hashtags": ["#..."]}',
     "",
     "CAPTION:",
     caption || "",
@@ -172,8 +189,11 @@ async function handleTranslate(request, env) {
   );
 
   const prompt = buildTranslationPrompt(caption, slots.map((s) => s.text_en), inSegs, source);
+  const mainTag = SOURCE_MAIN_TAG[source] || "#翻譯";
   let captionZh = "";
   let segmentsZh = [];
+  let seoHook = "";
+  let seoTags = [];
   try {
     const out = await env.AI.run(TEXT_MODEL, {
       prompt,
@@ -191,6 +211,10 @@ async function handleTranslate(request, env) {
       const segByI = new Map(segList.filter((s) => s && typeof s.i === "number")
         .map((s) => [s.i, typeof s.text_zh === "string" ? s.text_zh : ""]));
       segmentsZh = inSegs.map((s) => ({ i: s.i, text_zh: segByI.get(s.i) ?? "" }));
+      seoHook = typeof parsed.seo_hook_zh === "string" ? parsed.seo_hook_zh : "";
+      const tagList = Array.isArray(parsed.seo_hashtags) ? parsed.seo_hashtags : [];
+      seoTags = tagList.filter((t) => typeof t === "string" && t.startsWith("#")).slice(0, 10);
+      if (seoTags.length && !seoTags.includes(mainTag)) seoTags.unshift(mainTag);
     } catch {
       // Best-effort fallback: surface raw model output for the human reviewer.
       warnings.push("translation output was not valid JSON; returning raw model text for review");
@@ -200,7 +224,14 @@ async function handleTranslate(request, env) {
     warnings.push(`translation failed: ${String(e?.message || e).slice(0, 200)}`);
   }
 
-  return Response.json({ caption_zh: captionZh, image_texts: slots, segments_zh: segmentsZh, warnings });
+  return Response.json({
+    caption_zh: captionZh,
+    image_texts: slots,
+    segments_zh: segmentsZh,
+    seo_hook_zh: seoHook,
+    seo_hashtags: seoTags,
+    warnings,
+  });
 }
 
 export default {

@@ -539,6 +539,14 @@ def main():
                         log(f"  video watermark failed: {e}")
                         video_path, video_wm = video_src, "failed"
 
+            seo_hook = result.get("seo_hook_zh", "")
+            seo_tags = result.get("seo_hashtags", []) or []
+            post_bits = [b for b in [seo_hook, result.get("caption_zh", "")] if b]
+            if sub_count:
+                post_bits.append("🎙️ 片中已燒錄廣東話字幕")
+            post_bits.append(f"⚠️ 非官方中文翻譯，原文以 @{src['username']} 為準")
+            if seo_tags:
+                post_bits.append(" ".join(seo_tags))
             draft = {
                 "source": args.source,
                 "post_id": post_id,
@@ -548,6 +556,9 @@ def main():
                 "created_at": created,
                 "caption_en": caption_en,
                 "caption_zh": result.get("caption_zh", ""),
+                "seo_hook_zh": seo_hook,
+                "seo_hashtags": seo_tags,
+                "suggested_post_zh": "\n\n".join(post_bits),
                 "image_texts": result.get("image_texts", []),
                 "image_local_paths": local_paths,
                 "image_src_paths": src_paths,
