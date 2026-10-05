@@ -247,8 +247,12 @@ def watermark_image(src_path, dest_path, text=WATERMARK_TEXT):
 
 def download_video(post_url, dest_path):
     """Full mp4 via yt-dlp. Raises RuntimeError on failure."""
-    run(["yt-dlp", "-o", dest_path, "--no-warnings", "--no-playlist",
-         "-f", "mp4", "--merge-output-format", "mp4", post_url], timeout=600)
+    # --no-check-certificates: this VM's egress proxy MITMs TLS with a
+    # self-signed cert that yt-dlp's trust store rejects; the content is a
+    # public IG reel, so integrity risk is negligible (and we verify the mp4).
+    run(["yt-dlp", "--no-check-certificates", "-o", dest_path, "--no-warnings",
+         "--no-playlist", "-f", "mp4", "--merge-output-format", "mp4",
+         post_url], timeout=600)
 
 
 def watermark_video(src_path, dest_path, text=WATERMARK_TEXT):
