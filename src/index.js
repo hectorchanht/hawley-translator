@@ -5,6 +5,11 @@
  * Traditional Chinese, Hong Kong written style, for the fan account
  * @snhawleytranslatorhkunofficial (translations of US Senator Josh Hawley).
  *
+ * OCR does NOT happen here: PaddleOCR (PP-OCRv5 — the same engine realufo.org's
+ * crawler uses) runs on the VM inside scripts/poll.py, because PaddleOCR
+ * needs Python + native libs and can't run in a Worker. This Worker only
+ * translates pre-extracted text via Workers AI.
+ *
  * Endpoints:
  *   GET  /health     -> { ok: true }
  *   POST /translate  -> { caption_zh, image_texts, warnings }
@@ -12,28 +17,27 @@
  * POST /translate body:
  *   {
  *     "caption": "English caption text",
- *     "image_urls": ["https://...jpg", ...]   // up to 4, publicly fetchable
+ *     "image_texts": [
+ *       { "url": "images/<shortcode>/img0.jpg", "text_en": "OCR'd English text" }
+ *     ]
  *   }
  *
  * Response:
  *   {
  *     "caption_zh": "繁體中文翻譯…",
  *     "image_texts": [
- *       { "url": "https://…", "text_en": "OCR text or ''", "text_zh": "翻譯…" }
+ *       { "url": "…", "text_en": "…", "text_zh": "翻譯…" }
  *     ],
  *     "warnings": ["…"]   // empty when everything worked
  *   }
  *
  * Notes:
- * - OCR via Workers AI vision model; translation via Workers AI LLM.
  * - No database, no secrets, no posting — this Worker only translates.
  * - Review/publishing happens outside (see scripts/poll.py).
  */
 
-const VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct";
 const TEXT_MODEL = "@cf/meta/llama-3.1-8b-instruct";
 const MAX_IMAGES = 4;
-const MAX_IMAGE_BYTES = 2 * 1024 * 1024; // guard for vision-model input
 
 function extractJson(raw) {
   const cleaned = String(raw)
@@ -43,31 +47,6 @@ function extractJson(raw) {
   const end = cleaned.lastIndexOf("}");
   if (start === -1 || end === -1) throw new Error("no JSON object in model output");
   return JSON.parse(cleaned.slice(start, end + 1));
-}
-
-async function ocrImage(env, url) {
-  try {
-    const res = await fetch(url, {
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; hawley-translator/1.0)" },
-    });
-    if (!res.ok) return { ok: false, error: `fetch failed: HTTP ${res.status}` };
-    const buf = await res.arrayBuffer();
-    if (buf.byteLength === 0 || buf.byteLength > MAX_IMAGE_BYTES) {
-      return { ok: false, error: `unusable image size: ${buf.byteLength} bytes` };
-    }
-    const out = await env.AI.run(VISION_MODEL, {
-      prompt:
-        "Transcribe ALL text visible in this image, exactly as written, " +
-        "preserving line breaks. Return ONLY the transcribed text and nothing else. " +
-        "If there is no readable text, return exactly: NONE",
-      image: [...new Uint8Array(buf)],
-    });
-    const text = String(out?.response ?? "").trim();
-    if (!text || /^none\.?$/i.test(text)) return { ok: true, text: "" };
-    return { ok: true, text };
-  } catch (e) {
-    return { ok: false, error: String(e?.message || e).slice(0, 200) };
-  }
 }
 
 function buildTranslationPrompt(caption, imageTexts) {
@@ -103,17 +82,13 @@ async function handleTranslate(request, env) {
   }
 
   const caption = typeof body.caption === "string" ? body.caption : "";
-  let imageUrls = Array.isArray(body.image_urls) ? body.image_urls : [];
-  imageUrls = imageUrls.filter((u) => typeof u === "string" && u.startsWith("http")).slice(0, MAX_IMAGES);
+  const inTexts = Array.isArray(body.image_texts) ? body.image_texts : [];
+  const imageTexts = inTexts.slice(0, MAX_IMAGES).map((t) => ({
+    url: typeof t?.url === "string" ? t.url : "",
+    text_en: typeof t?.text_en === "string" ? t.text_en : "",
+    text_zh: "",
+  }));
 
-  // 1) OCR every image in parallel.
-  const ocrResults = await Promise.all(imageUrls.map((url) => ocrImage(env, url)));
-  const imageTexts = ocrResults.map((r, i) => {
-    if (!r.ok) warnings.push(`image ${i + 1}: OCR skipped (${r.error})`);
-    return { url: imageUrls[i], text_en: r.ok ? r.text : "", text_zh: "" };
-  });
-
-  // 2) Translate caption + OCR'd texts in one LLM call.
   const prompt = buildTranslationPrompt(caption, imageTexts.map((t) => t.text_en));
   let captionZh = "";
   try {
@@ -151,7 +126,7 @@ export default {
     if (request.method === "GET" && url.pathname === "/") {
       return Response.json({
         name: "hawley-translator",
-        usage: "POST /translate with { caption, image_urls[] }",
+        usage: "POST /translate with { caption, image_texts: [{url, text_en}] }",
       });
     }
     if (request.method === "POST" && url.pathname === "/translate") {

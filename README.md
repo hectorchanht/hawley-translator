@@ -19,34 +19,43 @@ Scope: **post caption + text visible in images**. No video transcription (yet).
 │  VM (this repo:  │      │  `hawley-translator`    │      │  (Hector)            │
 │  scripts/poll.py)│      │  src/index.js           │      │                      │
 │                  │      │                         │      │  reads               │
-│  1. instagram-cli│ POST │  2. OCR each image via  │ JSON │  review_queue.json   │
-│     reads latest │─────▶│     Workers AI vision   │─────▶│  + downloaded media  │
-│     @senatorhawley│/trans│     model               │      │                      │
-│     posts (newer │ late │  3. translate caption   │      │  approves → publish  │
-│     than watermark│      │     + OCR text via      │      │  manually (IG app    │
-│                  │      │     Workers AI LLM into │      │  or future poster)  │
-│  4. append draft │      │     Traditional Chinese │      │                      │
-│     to review    │      │     (HK 書面語，霍利)    │      │                      │
+│  1. instagram-cli│ POST │  4. translate caption   │ JSON │  review_queue.json   │
+│     reads latest │─────▶│     + OCR text via      │─────▶│  + downloaded media  │
+│     @senatorhawley│/trans│     Workers AI LLM into │      │                      │
+│     posts (newer │ late │     Traditional Chinese │      │  approves → publish  │
+│     than watermark│      │     (HK 書面語，霍利)    │      │  manually (IG app    │
+│                  │      │                         │      │  or future poster)  │
+│  2. resolve image│      │  No DB, no secrets,     │      │                      │
+│     via oEmbed   │      │  no posting, no OCR —   │      │                      │
+│  3. OCR with     │      │  translation only.      │      │                      │
+│     PaddleOCR    │      │                         │      │                      │
+│                  │      │                         │      │                      │
+│  5. append draft │      │                         │      │                      │
+│     to review    │      │                         │      │                      │
 │     queue, save  │      │                         │      │                      │
-│     watermark    │      │  No DB, no secrets,     │      │                      │
-└──────────────────┘      │  no posting.            │      └──────────────────────┘
-                          └──────────────────────┘
+│     watermark    │      │                         │      │                      │
+└──────────────────┘      └─────────────────────────┘      └──────────────────────┘
 ```
 
 Data flow per new post:
 
 1. **Poll** — `scripts/poll.py` asks `instagram-cli` for the latest posts from
    `@senatorhawley`, filters out ids already in `watermark.json`.
-2. **Resolve media** — for each new post it tries to get publicly-fetchable
-   image URLs: any image fields `instagram-cli` exposes, else (for reels/videos)
-   the poster thumbnail via `yt-dlp --print thumbnail`. Plain image/carousel
-   posts currently can't be resolved from a datacenter IP (Instagram
-   login-walls them) — those drafts are caption-only with a warning.
-3. **Translate** — the caption + image URLs are POSTed to the Worker's
-   `/translate`. The Worker OCRs the images (vision model), then translates
-   everything in one LLM call (`霍利` for Hawley, @mentions/#hashtags kept,
-   line breaks preserved).
-4. **Queue** — media is downloaded locally, the draft (EN + ZH + OCR results +
+2. **Resolve media** — image URLs come from Instagram's public oEmbed endpoint
+   (`/api/v1/oembed/` → `thumbnail_url`, a scontent CDN URL), which works for
+   every post type — this is what unlocks plain image posts, for which
+   `instagram-cli` exposes no media URL at all. (Carousels: first image only.)
+   Reels fall back to `yt-dlp --print thumbnail`.
+3. **OCR** — PaddleOCR **PP-OCRv5** (`PP-OCRv5_mobile_det` +
+   `en_PP-OCRv5_mobile_rec`, score threshold 0.5) — the *same engine and
+   settings* realufo.org's crawler uses (`realufo/crawler/ingest/ocr.py`).
+   PaddleOCR needs Python + native libs so it can't run inside a Cloudflare
+   Worker; it runs here on the VM. Needs the `.venv-ocr` venv (see Cron
+   setup); without it the script degrades to caption-only drafts.
+4. **Translate** — caption + OCR'd texts are POSTed to the Worker's
+   `/translate`, which returns Traditional Chinese (HK 書面語，霍利 for
+   Hawley, @mentions/#hashtags kept, line breaks preserved).
+5. **Queue** — media is downloaded locally, the draft (EN + ZH + OCR results +
    warnings) is appended to `review_queue.json`, the watermark advances.
 
 ## Deploy the Worker
@@ -66,12 +75,14 @@ there) — deploys go through the dashboard, never `wrangler deploy` from here.
 ## Cron setup (VM)
 
 ```bash
-# requirements on the VM: instagram-cli (linked account), python3, yt-dlp
-pip install -r scripts/requirements.txt   # yt-dlp
+# one-time: dedicated venv for PaddleOCR (heavy: ~2 GB with paddlepaddle)
+python3 -m venv ~/workspace/goals/hawley-ig-auto-translate-bot/.venv-ocr
+~/workspace/goals/hawley-ig-auto-translate-bot/.venv-ocr/bin/pip install -r scripts/requirements.txt
 
-# every 4 hours: poll, translate, queue drafts for review
+# every 4 hours: poll, OCR, translate, queue drafts for review
 0 */4 * * * HAWLEY_TRANSLATOR_URL=https://hawley-translator.<acct>.workers.dev \
-  /usr/bin/python3 /path/to/hawley-translator/scripts/poll.py \
+  ~/workspace/goals/hawley-ig-auto-translate-bot/.venv-ocr/bin/python \
+  /path/to/hawley-translator/scripts/poll.py \
   --state-dir ~/workspace/goals/hawley-ig-auto-translate-bot/hidden_files \
   >> ~/workspace/goals/hawley-ig-auto-translate-bot/hidden_files/poll.log 2>&1
 ```
@@ -79,7 +90,7 @@ pip install -r scripts/requirements.txt   # yt-dlp
 Dry run first (lists new posts, translates nothing):
 
 ```bash
-python3 scripts/poll.py --dry-run
+~/workspace/goals/hawley-ig-auto-translate-bot/.venv-ocr/bin/python scripts/poll.py --dry-run
 ```
 
 ## Still needed (not done by this scaffold)
@@ -97,10 +108,9 @@ python3 scripts/poll.py --dry-run
 
 ## Known limitations
 
-- Instagram serves its post pages / `og:image` only to logged-in browsers;
-  datacenter IPs get a login wall. Hence image/carousel posts currently yield
-  caption-only drafts. Reels/videos work via `yt-dlp` thumbnails (public CDN).
-- `scontent` CDN URLs expire — the poller sends them to the Worker immediately
-  and downloads local copies for the review archive; don't store the URLs.
+- oEmbed `thumbnail_url` is 640px and carousels expose only the first image —
+  small text and later carousel slides aren't OCR'd (caption still translated).
+- `scontent` CDN URLs expire — the poller downloads local copies immediately
+  for the review archive; don't store the URLs.
 - Workers AI free tier: 10,000 neurons/day — a few translated posts/day is
   comfortably inside it.
