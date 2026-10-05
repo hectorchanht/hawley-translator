@@ -4,7 +4,7 @@ Multi-source Instagram auto-translation pipeline producing Traditional
 Chinese (Hong Kong style) translations for the translator fan accounts:
 
 - [@snhawleytranslatorhkunofficial](https://www.instagram.com/snhawleytranslatorhkunofficial) — translations of US Senator Josh Hawley's posts ([@senatorhawley](https://www.instagram.com/senatorhawley)).
-- Trump translator account (handle TBD — Hector to create) — translations of Donald Trump's posts ([@realdonaldtrump](https://www.instagram.com/realdonaldtrump)).
+- [@trumptranslatorhkunofficial](https://www.instagram.com/trumptranslatorhkunofficial) — translations of Donald Trump's posts ([@realdonaldtrump](https://www.instagram.com/realdonaldtrump)).
 
 Scope: **post caption + text visible in images**. No video transcription (yet).
 
@@ -111,11 +111,7 @@ Dry run first (lists new posts, translates nothing):
 
 ## Still needed (not done by this scaffold)
 
-- [ ] **Hector creates the Trump translator IG account** (provisional
-      handle in the code: `@trumptranslatorhkunofficial`; display name
-      suggestion: 美國特朗普總統香港翻譯(非官方)). Once created, confirm the
-      handle so `SOURCES["trump"]["watermark_text"]` can be finalized —
-      the handle is burned into every published image/video.
+- [x] **Trump translator IG account created** 2026-10-05: `@trumptranslatorhkunofficial` (display name 美國特朗普總統香港翻譯(非官方)). Watermark text in `SOURCES["trump"]` already matches — no code change needed.
 - [ ] **Hector links `@snhawleytranslatorhkunofficial` to Muse** in Meta
       Accounts Center (today only `@realufo_org` is linked, so nothing can be
       published to the translator account yet). Note: Meta allows only ONE
