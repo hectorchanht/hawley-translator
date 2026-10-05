@@ -26,9 +26,9 @@ Scope: **post caption + text visible in images**. No video transcription (yet).
 │     than watermark│      │     (HK 書面語，霍利)    │      │  manually (IG app    │
 │                  │      │                         │      │  or future poster)  │
 │  2. resolve image│      │  No DB, no secrets,     │      │                      │
-│     via oEmbed   │      │  no posting, no OCR —   │      │                      │
-│  3. OCR with     │      │  translation only.      │      │                      │
-│     PaddleOCR    │      │                         │      │                      │
+│     via oEmbed   │      │  no posting. OCR only   │      │                      │
+│  3. OCR: Paddle- │      │  as fallback when the   │      │                      │
+│     OCR on VM    │      │  VM can't run PaddleOCR │      │                      │
 │                  │      │                         │      │                      │
 │  5. append draft │      │                         │      │                      │
 │     to review    │      │                         │      │                      │
@@ -46,12 +46,15 @@ Data flow per new post:
    every post type — this is what unlocks plain image posts, for which
    `instagram-cli` exposes no media URL at all. (Carousels: first image only.)
    Reels fall back to `yt-dlp --print thumbnail`.
-3. **OCR** — PaddleOCR **PP-OCRv5** (`PP-OCRv5_mobile_det` +
+3. **OCR (two tiers)** — Tier 1: PaddleOCR **PP-OCRv5** (`PP-OCRv5_mobile_det` +
    `en_PP-OCRv5_mobile_rec`, score threshold 0.5) — the *same engine and
    settings* realufo.org's crawler uses (`realufo/crawler/ingest/ocr.py`).
    PaddleOCR needs Python + native libs so it can't run inside a Cloudflare
-   Worker; it runs here on the VM. Needs the `.venv-ocr` venv (see Cron
-   setup); without it the script degrades to caption-only drafts.
+   Worker; it runs here on the VM via the `.venv-ocr` venv (see Cron setup).
+   Tier 2 (fallback): if PaddleOCR can't run on the VM, the poller also sends
+   the image URLs and the Worker OCRs them with a Workers AI vision model —
+   so image text is still extracted either way. The draft records which tier
+   produced the text (via `warnings`).
 4. **Translate** — caption + OCR'd texts are POSTed to the Worker's
    `/translate`, which returns Traditional Chinese (HK 書面語，霍利 for
    Hawley, @mentions/#hashtags kept, line breaks preserved).
@@ -108,6 +111,15 @@ Dry run first (lists new posts, translates nothing):
 
 ## Known limitations
 
+- PaddleOCR's models can't be fetched with `huggingface_hub` from the
+  operator VM (the egress proxy mangles HF URLs) — download them with
+  `curl -L` into `~/.paddlex/official_models/<model>/` instead, and
+  `pip install paddlepaddle` separately (paddleocr doesn't pull it in).
+  Note (2026-10-05): PaddlePaddle 3.3.1's oneDNN executor fails on
+  `PP-OCRv5_mobile_det` on this VM (`ConvertPirAttribute2RuntimeAttribute`
+  unimplemented) — the same pinned versions run fine in GitHub Actions.
+  The Worker's vision-model OCR fallback covers this VM until the runtime
+  is fixed.
 - oEmbed `thumbnail_url` is 640px and carousels expose only the first image —
   small text and later carousel slides aren't OCR'd (caption still translated).
 - `scontent` CDN URLs expire — the poller downloads local copies immediately

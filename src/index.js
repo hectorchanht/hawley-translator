@@ -5,10 +5,14 @@
  * Traditional Chinese, Hong Kong written style, for the fan account
  * @snhawleytranslatorhkunofficial (translations of US Senator Josh Hawley).
  *
- * OCR does NOT happen here: PaddleOCR (PP-OCRv5 — the same engine realufo.org's
- * crawler uses) runs on the VM inside scripts/poll.py, because PaddleOCR
- * needs Python + native libs and can't run in a Worker. This Worker only
- * translates pre-extracted text via Workers AI.
+ * OCR is done in TWO tiers:
+ *   1. Preferred: PaddleOCR PP-OCRv5 on the VM (scripts/poll.py) — the same
+ *      engine realufo.org's crawler uses. The poller sends pre-extracted text
+ *      as `image_texts`. (PaddleOCR needs Python + native libs, so it can't
+ *      run inside a Worker.)
+ *   2. Fallback: if the poller couldn't OCR (e.g. PaddleOCR unavailable on
+ *      that runtime), it also sends `image_urls` and the Worker OCRs them
+ *      with a Workers AI vision model.
  *
  * Endpoints:
  *   GET  /health     -> { ok: true }
@@ -17,9 +21,10 @@
  * POST /translate body:
  *   {
  *     "caption": "English caption text",
- *     "image_texts": [
- *       { "url": "images/<shortcode>/img0.jpg", "text_en": "OCR'd English text" }
- *     ]
+ *     "image_texts": [                       // preferred: pre-OCR'd
+ *       { "url": "images/<sc>/img0.jpg", "text_en": "OCR'd English text" }
+ *     ],
+ *     "image_urls": ["https://…jpg"]          // fallback: Worker OCRs these
  *   }
  *
  * Response:
@@ -36,8 +41,10 @@
  * - Review/publishing happens outside (see scripts/poll.py).
  */
 
+const VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct";
 const TEXT_MODEL = "@cf/meta/llama-3.1-8b-instruct";
 const MAX_IMAGES = 4;
+const MAX_IMAGE_BYTES = 2 * 1024 * 1024; // guard for vision-model input
 
 function extractJson(raw) {
   const cleaned = String(raw)
@@ -47,6 +54,31 @@ function extractJson(raw) {
   const end = cleaned.lastIndexOf("}");
   if (start === -1 || end === -1) throw new Error("no JSON object in model output");
   return JSON.parse(cleaned.slice(start, end + 1));
+}
+
+async function ocrImage(env, url) {
+  try {
+    const res = await fetch(url, {
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; hawley-translator/1.0)" },
+    });
+    if (!res.ok) return { ok: false, error: `fetch failed: HTTP ${res.status}` };
+    const buf = await res.arrayBuffer();
+    if (buf.byteLength === 0 || buf.byteLength > MAX_IMAGE_BYTES) {
+      return { ok: false, error: `unusable image size: ${buf.byteLength} bytes` };
+    }
+    const out = await env.AI.run(VISION_MODEL, {
+      prompt:
+        "Transcribe ALL text visible in this image, exactly as written, " +
+        "preserving line breaks. Return ONLY the transcribed text and nothing else. " +
+        "If there is no readable text, return exactly: NONE",
+      image: [...new Uint8Array(buf)],
+    });
+    const text = String(out?.response ?? "").trim();
+    if (!text || /^none\.?$/i.test(text)) return { ok: true, text: "" };
+    return { ok: true, text };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e).slice(0, 200) };
+  }
 }
 
 function buildTranslationPrompt(caption, imageTexts) {
@@ -83,13 +115,35 @@ async function handleTranslate(request, env) {
 
   const caption = typeof body.caption === "string" ? body.caption : "";
   const inTexts = Array.isArray(body.image_texts) ? body.image_texts : [];
-  const imageTexts = inTexts.slice(0, MAX_IMAGES).map((t) => ({
-    url: typeof t?.url === "string" ? t.url : "",
-    text_en: typeof t?.text_en === "string" ? t.text_en : "",
-    text_zh: "",
-  }));
+  const inUrls = (Array.isArray(body.image_urls) ? body.image_urls : [])
+    .filter((u) => typeof u === "string" && u.startsWith("http"));
+  const n = Math.min(MAX_IMAGES, Math.max(inTexts.length, inUrls.length));
 
-  const prompt = buildTranslationPrompt(caption, imageTexts.map((t) => t.text_en));
+  const slots = [];
+  for (let i = 0; i < n; i++) {
+    slots.push({
+      url: typeof inTexts[i]?.url === "string" && inTexts[i].url
+        ? inTexts[i].url
+        : (inUrls[i] || ""),
+      text_en: typeof inTexts[i]?.text_en === "string" ? inTexts[i].text_en : "",
+      text_zh: "",
+    });
+  }
+
+  // Fallback tier: Worker-side vision OCR for slots that arrived without text.
+  await Promise.all(
+    slots.map(async (s, i) => {
+      if (s.text_en || !s.url.startsWith("http")) return;
+      const r = await ocrImage(env, s.url);
+      if (r.ok) {
+        s.text_en = r.text;
+      } else {
+        warnings.push(`image ${i + 1}: Worker OCR skipped (${r.error})`);
+      }
+    })
+  );
+
+  const prompt = buildTranslationPrompt(caption, slots.map((s) => s.text_en));
   let captionZh = "";
   try {
     const out = await env.AI.run(TEXT_MODEL, {
@@ -101,8 +155,8 @@ async function handleTranslate(request, env) {
       const parsed = extractJson(raw);
       captionZh = typeof parsed.caption_zh === "string" ? parsed.caption_zh : "";
       const zhList = Array.isArray(parsed.image_texts_zh) ? parsed.image_texts_zh : [];
-      imageTexts.forEach((t, i) => {
-        t.text_zh = typeof zhList[i] === "string" ? zhList[i] : "";
+      slots.forEach((s, i) => {
+        s.text_zh = typeof zhList[i] === "string" ? zhList[i] : "";
       });
     } catch {
       // Best-effort fallback: surface raw model output for the human reviewer.
@@ -113,7 +167,7 @@ async function handleTranslate(request, env) {
     warnings.push(`translation failed: ${String(e?.message || e).slice(0, 200)}`);
   }
 
-  return Response.json({ caption_zh: captionZh, image_texts: imageTexts, warnings });
+  return Response.json({ caption_zh: captionZh, image_texts: slots, warnings });
 }
 
 export default {
@@ -126,7 +180,7 @@ export default {
     if (request.method === "GET" && url.pathname === "/") {
       return Response.json({
         name: "hawley-translator",
-        usage: "POST /translate with { caption, image_texts: [{url, text_en}] }",
+        usage: "POST /translate with { caption, image_texts: [{url, text_en}], image_urls? }",
       });
     }
     if (request.method === "POST" && url.pathname === "/translate") {

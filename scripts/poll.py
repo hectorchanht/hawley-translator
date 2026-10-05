@@ -204,9 +204,18 @@ def download(url, dest_path):
         f.write(r.read())
 
 
-def translate(worker_url, caption, image_texts):
-    """POST pre-OCR'd texts to the Worker; it returns the translations."""
-    payload = json.dumps({"caption": caption, "image_texts": image_texts}).encode()
+def translate(worker_url, caption, image_texts, image_urls=()):
+    """POST pre-OCR'd texts to the Worker; it returns the translations.
+
+    image_urls is a fallback: for any image that arrived without OCR text
+    (PaddleOCR unavailable on this runtime), the Worker OCRs the URL itself
+    with its vision model.
+    """
+    payload = json.dumps({
+        "caption": caption,
+        "image_texts": image_texts,
+        "image_urls": list(image_urls),
+    }).encode()
     req = urllib.request.Request(
         worker_url.rstrip("/") + "/translate",
         data=payload,
@@ -311,7 +320,10 @@ def main():
                         log(f"  OCR failed for {lp}: {e}")
                         image_texts.append({"url": lp, "text_en": ""})
 
-            result = translate(args.worker_url, caption_en, image_texts)
+            # Fallback: if PaddleOCR produced no text (unavailable on this
+            # runtime), hand the URLs to the Worker so IT can OCR them.
+            result = translate(args.worker_url, caption_en, image_texts,
+                               image_urls=media_urls)
 
             draft = {
                 "post_id": post_id,

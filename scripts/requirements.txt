@@ -1,5 +1,8 @@
 yt-dlp>=2024.1.1
 # PaddleOCR — the SAME OCR engine realufo.org's crawler uses (PP-OCRv5).
+# Pinned to realufo's versions (crawler/ingest/requirements-ocr.txt).
 # Heavy (~2 GB with paddlepaddle): install into the dedicated venv, not system python:
 #   python3 -m venv .venv-ocr && .venv-ocr/bin/pip install -r scripts/requirements.txt
-paddleocr
+# NOTE: paddlepaddle does NOT come with paddleocr — install it explicitly.
+paddleocr==3.7.0
+paddlepaddle==3.3.1
