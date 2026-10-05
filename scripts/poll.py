@@ -383,8 +383,15 @@ def main():
 
     os.makedirs(args.state_dir, exist_ok=True)
     os.makedirs(os.path.join(args.state_dir, "images"), exist_ok=True)
-    wm_path = os.path.join(args.state_dir, f"watermark_{args.source}.json")
-    q_path = os.path.join(args.state_dir, f"review_queue_{args.source}.json")
+    # Backwards compatible: hawley keeps the original state filenames (the
+    # Zapier "hawley review drafter" skill reads review_queue.json); other
+    # sources get suffixed filenames.
+    if args.source == "hawley":
+        wm_path = os.path.join(args.state_dir, "watermark.json")
+        q_path = os.path.join(args.state_dir, "review_queue.json")
+    else:
+        wm_path = os.path.join(args.state_dir, f"watermark_{args.source}.json")
+        q_path = os.path.join(args.state_dir, f"review_queue_{args.source}.json")
     watermark = load_json(wm_path, {"seen_ids": [], "failures": {}})
     queue = load_json(q_path, [])
     seen = set(watermark.get("seen_ids", []))
