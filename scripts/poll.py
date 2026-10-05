@@ -326,10 +326,18 @@ def write_srt(segments, path):
 
 # Trailing punctuation stripped from subtitle cues — cleaner on screen.
 SUB_TRAILING_PUNCT = "，。、；：？！…,.!?"
+SUB_CLOSING = "」』\"'）】〉"
 
 
 def clean_subtitle(text):
-    return text.rstrip(SUB_TRAILING_PUNCT)
+    # strip trailing punctuation, even when it sits inside closing
+    # quotes/brackets (e.g. 「我哋唔使負責。」 -> 「我哋唔使負責」)
+    return re.sub(
+        "[" + re.escape(SUB_TRAILING_PUNCT) + "]+"
+        "([" + re.escape(SUB_CLOSING) + "])?$",
+        r"\1",
+        text.rstrip(),
+    )
 
 
 def burn_subtitles(src_path, srt_path, dest_path, text):
