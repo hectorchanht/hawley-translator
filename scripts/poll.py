@@ -324,6 +324,14 @@ def write_srt(segments, path):
                     f"{s['text']}\n\n")
 
 
+# Trailing punctuation stripped from subtitle cues — cleaner on screen.
+SUB_TRAILING_PUNCT = "，。、；：？！…,.!?"
+
+
+def clean_subtitle(text):
+    return text.rstrip(SUB_TRAILING_PUNCT)
+
+
 def burn_subtitles(src_path, srt_path, dest_path, text):
     """Burn Cantonese subtitles + watermark in one ffmpeg pass. Raises."""
     safe = text.replace("\\", "\\\\").replace(":", "\\:").replace("'", "")
@@ -516,7 +524,7 @@ def main():
                            if isinstance(s, dict)}
                 subs = []
                 for k, s in enumerate(segments_en):
-                    t = zh_by_i.get(k, "")
+                    t = clean_subtitle(zh_by_i.get(k, ""))
                     if t:
                         subs.append({"start": s["start"], "end": s["end"], "text": t})
                 if subs:
