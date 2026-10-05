@@ -52,7 +52,11 @@
  */
 
 const VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct";
-const TEXT_MODEL = "@cf/meta/llama-3.1-8b-instruct";
+// NOTE 2026-10-05: @cf/meta/llama-3.1-8b-instruct was deprecated by Cloudflare
+// on 2026-05-30 (Worker returned 5028). Llama 3.3 70B FP8 is the current
+// text model. Account is on Workers Paid, so neuron overage is billed tiny,
+// not hard-capped.
+const TEXT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 const MAX_IMAGES = 4;
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024; // guard for vision-model input
 
