@@ -280,8 +280,9 @@ def download_video(post_url, dest_path):
 def watermark_video(src_path, dest_path, text):
     """Burn the watermark into the video with ffmpeg drawtext. Raises."""
     safe = text.replace("\\", "\\\\").replace(":", "\\:").replace("'", "")
+    # fontsize scales with the SMALLER dimension so vertical reels don't clip
     vf = (f"drawtext=fontfile={WATERMARK_FONT_TTC}:text='{safe}':"
-          f"fontsize=h/28:x=(w-text_w)/2:y=h-text_h-20:"
+          f"fontsize=min(w\\,h)/26:x=(w-text_w)/2:y=h-text_h-20:"
           f"fontcolor=white:box=1:boxcolor=black@0.55:boxborderw=12")
     run(["ffmpeg", "-y", "-v", "error", "-i", src_path,
          "-vf", vf, "-c:a", "copy", dest_path], timeout=600)
@@ -332,7 +333,7 @@ def burn_subtitles(src_path, srt_path, dest_path, text):
              "MarginV=80,Alignment=2")
     vf = (f"subtitles='{srt_esc}':fontsdir='/usr/share/fonts/opentype/noto':"
           f"force_style='{style}',"
-          f"drawtext=fontfile={WATERMARK_FONT_TTC}:text='{safe}':fontsize=h/28:"
+          f"drawtext=fontfile={WATERMARK_FONT_TTC}:text='{safe}':fontsize=min(w\\,h)/26:"
           f"x=(w-text_w)/2:y=h-text_h-20:fontcolor=white:box=1:"
           f"boxcolor=black@0.55:boxborderw=12")
     run(["ffmpeg", "-y", "-v", "error", "-i", src_path,
