@@ -268,7 +268,7 @@ async function handleTranslate(request, env) {
   try {
     const out = await env.AI.run(TEXT_MODEL, {
       prompt,
-      max_tokens: 4096,
+      max_tokens: 8192, // 2026-10-05: 4096 truncated long segment lists mid-JSON
     });
     const raw = String(out?.response ?? "");
     try {
