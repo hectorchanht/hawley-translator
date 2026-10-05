@@ -2,8 +2,10 @@
  * hawley-translator — Cloudflare Worker
  *
  * Translates Instagram posts (caption + text visible in images) into
- * Traditional Chinese, Hong Kong written style, for the fan account
- * @snhawleytranslatorhkunofficial (translations of US Senator Josh Hawley).
+ * Traditional Chinese, Hong Kong written style, for the translator fan
+ * accounts (currently @snhawleytranslatorhkunofficial for US Senator Josh
+ * Hawley; multi-source — the poller sends `source` and the Worker applies
+ * per-source name rules).
  *
  * OCR is done in TWO tiers:
  *   1. Preferred: PaddleOCR PP-OCRv5 on the VM (scripts/poll.py) — the same
@@ -24,7 +26,10 @@
  *     "image_texts": [                       // preferred: pre-OCR'd
  *       { "url": "images/<sc>/img0.jpg", "text_en": "OCR'd English text" }
  *     ],
- *     "image_urls": ["https://…jpg"]          // fallback: Worker OCRs these
+ *     "image_urls": ["https://…jpg"],         // fallback: Worker OCRs these
+ *     "segments": [                           // video speech segments
+ *       { "i": 0, "text_en": "If you break it, you pay for it." }
+ *     ]
  *   }
  *
  * Response:
@@ -33,6 +38,7 @@
  *     "image_texts": [
  *       { "url": "…", "text_en": "…", "text_zh": "翻譯…" }
  *     ],
+ *     "segments_zh": [ { "i": 0, "text_zh": "翻譯…" } ],
  *     "warnings": ["…"]   // empty when everything worked
  *   }
  *
@@ -45,6 +51,14 @@ const VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct";
 const TEXT_MODEL = "@cf/meta/llama-3.1-8b-instruct";
 const MAX_IMAGES = 4;
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024; // guard for vision-model input
+
+// Per-source person-name rules. The poller sends `source` in the POST body;
+// unknown sources get the generic rules (mentions/hashtags kept).
+const SOURCE_NAME_RULES = {
+  hawley: '- Render "Josh Hawley" / "Hawley" / "Senator Hawley" as 霍利 / 霍利參議員.',
+  trump:
+    '- Render "Donald Trump" / "Trump" / "President Trump" as 特朗普 / 特朗普總統.',
+};
 
 function extractJson(raw) {
   const cleaned = String(raw)
@@ -81,25 +95,34 @@ async function ocrImage(env, url) {
   }
 }
 
-function buildTranslationPrompt(caption, imageTexts) {
+function buildTranslationPrompt(caption, imageTexts, segments, source) {
+  const nameRule = SOURCE_NAME_RULES[source] || "";
   const parts = [
     "You are a professional translator writing for a Hong Kong audience.",
     "Translate the English content below into Traditional Chinese, Hong Kong written style (書面語，繁體中文).",
     "Rules:",
-    '- Render "Josh Hawley" / "Hawley" / "Senator Hawley" as 霍利 / 霍利參議員.',
+  ];
+  if (nameRule) parts.push(nameRule);
+  parts.push(
     "- Keep @mentions (e.g. @senatorhawley) and #hashtags unchanged.",
     "- Preserve line breaks and paragraph structure.",
     "- Be faithful and concise. Do not add commentary, explanations, or extra content.",
     "- If a segment is empty, return an empty string for it.",
+    "- SPEECH segments become burned-in video subtitles: keep each one short " +
+      "(one line, under 20 Chinese characters when possible), Cantonese-flavoured " +
+      "where natural (嘅, 咁, 係, 唔), faithful to the spoken meaning.",
     "",
     "Return ONLY valid JSON, no markdown fences, with this exact shape:",
-    '{"caption_zh": "...", "image_texts_zh": ["...", "..."]}',
+    '{"caption_zh": "...", "image_texts_zh": ["...", "..."], "segments_zh": [{"i": 0, "text_zh": "..."}]}',
     "",
     "CAPTION:",
     caption || "",
-  ];
+  );
   imageTexts.forEach((t, i) => {
     parts.push("", `IMAGE ${i + 1} TEXT:`, t || "");
+  });
+  segments.forEach((s) => {
+    parts.push("", `SPEECH ${s.i}:`, s.text_en || "");
   });
   return parts.join("\n");
 }
@@ -114,9 +137,14 @@ async function handleTranslate(request, env) {
   }
 
   const caption = typeof body.caption === "string" ? body.caption : "";
+  const source = typeof body.source === "string" ? body.source : "hawley";
   const inTexts = Array.isArray(body.image_texts) ? body.image_texts : [];
   const inUrls = (Array.isArray(body.image_urls) ? body.image_urls : [])
     .filter((u) => typeof u === "string" && u.startsWith("http"));
+  const inSegs = (Array.isArray(body.segments) ? body.segments : [])
+    .filter((s) => s && typeof s.text_en === "string")
+    .map((s, k) => ({ i: typeof s.i === "number" ? s.i : k, text_en: s.text_en }))
+    .slice(0, 200);
   const n = Math.min(MAX_IMAGES, Math.max(inTexts.length, inUrls.length));
 
   const slots = [];
@@ -143,12 +171,13 @@ async function handleTranslate(request, env) {
     })
   );
 
-  const prompt = buildTranslationPrompt(caption, slots.map((s) => s.text_en));
+  const prompt = buildTranslationPrompt(caption, slots.map((s) => s.text_en), inSegs, source);
   let captionZh = "";
+  let segmentsZh = [];
   try {
     const out = await env.AI.run(TEXT_MODEL, {
       prompt,
-      max_tokens: 2048,
+      max_tokens: 4096,
     });
     const raw = String(out?.response ?? "");
     try {
@@ -158,6 +187,10 @@ async function handleTranslate(request, env) {
       slots.forEach((s, i) => {
         s.text_zh = typeof zhList[i] === "string" ? zhList[i] : "";
       });
+      const segList = Array.isArray(parsed.segments_zh) ? parsed.segments_zh : [];
+      const segByI = new Map(segList.filter((s) => s && typeof s.i === "number")
+        .map((s) => [s.i, typeof s.text_zh === "string" ? s.text_zh : ""]));
+      segmentsZh = inSegs.map((s) => ({ i: s.i, text_zh: segByI.get(s.i) ?? "" }));
     } catch {
       // Best-effort fallback: surface raw model output for the human reviewer.
       warnings.push("translation output was not valid JSON; returning raw model text for review");
@@ -167,7 +200,7 @@ async function handleTranslate(request, env) {
     warnings.push(`translation failed: ${String(e?.message || e).slice(0, 200)}`);
   }
 
-  return Response.json({ caption_zh: captionZh, image_texts: slots, warnings });
+  return Response.json({ caption_zh: captionZh, image_texts: slots, segments_zh: segmentsZh, warnings });
 }
 
 export default {

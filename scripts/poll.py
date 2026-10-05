@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""Poll @senatorhawley for new Instagram posts, translate them via the
+"""Poll Instagram source accounts for new posts, translate them via the
 hawley-translator Cloudflare Worker, and queue drafts for HUMAN REVIEW.
+
+Sources are configured in SOURCES (--source hawley|trump, default hawley);
+each source gets its own watermark + review-queue state files.
 
 Scope: post caption + text visible in images (no video transcription).
 
 Media: every image is downloaded and burned with a translation watermark
 ("非官方中文翻譯 · @snhawleytranslatorhkunofficial"); videos/reels are
 downloaded in full via yt-dlp (IG publishing requires the file — a URL is
-not enough) and watermarked with ffmpeg. Originals are kept as src* files;
+not enough), transcribed with faster-whisper, translated, and burned with
+Cantonese subtitles + watermark via ffmpeg. Originals are kept as src* files;
 the watermarked img*/clip* files are what gets published.
 
 OCR engine: PaddleOCR PP-OCRv5 — the SAME engine realufo.org's crawler uses
@@ -46,10 +50,28 @@ import urllib.parse
 import urllib.request
 
 DEFAULT_ACCOUNT_ID = "17841426633545671"  # linked @realufo_org — used read-only
-DEFAULT_USERNAME = "senatorhawley"
+DEFAULT_SOURCE = "hawley"
 DEFAULT_STATE_DIR = os.path.expanduser(
     "~/workspace/goals/hawley-ig-auto-translate-bot/hidden_files"
 )
+
+# One entry per translated figure. The review queue, watermark state files,
+# and the burned-in "unofficial translation" watermark are all per-source.
+SOURCES = {
+    "hawley": {
+        "username": "senatorhawley",
+        "label": "Josh Hawley",
+        "watermark_text": "非官方中文翻譯 · @snhawleytranslatorhkunofficial",
+    },
+    "trump": {
+        "username": "realdonaldtrump",
+        "label": "Donald Trump",
+        # PROVISIONAL — Hector hasn't created the translator account yet;
+        # update this handle once the real one exists (images are burned
+        # with it, so re-queue any already-processed drafts after a rename).
+        "watermark_text": "非官方中文翻譯 · @trumptranslatorhkunofficial",
+    },
+}
 SHORTCODE_RE = re.compile(r"instagram\.com/(?:p|reel|reels)/([^/?#]+)")
 SEEN_CAP = 500
 MAX_FAILURES = 3
@@ -214,7 +236,7 @@ def download(url, dest_path):
 
 # Watermark burned into every published image/video: marks the repost as an
 # unofficial translation. Originals are kept as src* files (never published).
-WATERMARK_TEXT = "非官方中文翻譯 · @snhawleytranslatorhkunofficial"
+# The actual text is per-source (SOURCES[...]["watermark_text"]) and passed in.
 WATERMARK_FONT_TTC = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 WATERMARK_FONT_INDEX = 4  # Noto Sans CJK HK inside the .ttc
 
@@ -227,7 +249,7 @@ def _cjk_font(size):
         return ImageFont.truetype(WATERMARK_FONT_TTC, size)  # first face fallback
 
 
-def watermark_image(src_path, dest_path, text=WATERMARK_TEXT):
+def watermark_image(src_path, dest_path, text):
     """Bottom bar, semi-transparent black, white CJK text. Raises on failure."""
     from PIL import Image, ImageDraw
     im = Image.open(src_path).convert("RGBA")
@@ -255,7 +277,7 @@ def download_video(post_url, dest_path):
          post_url], timeout=600)
 
 
-def watermark_video(src_path, dest_path, text=WATERMARK_TEXT):
+def watermark_video(src_path, dest_path, text):
     """Burn the watermark into the video with ffmpeg drawtext. Raises."""
     safe = text.replace("\\", "\\\\").replace(":", "\\:").replace("'", "")
     vf = (f"drawtext=fontfile={WATERMARK_FONT_TTC}:text='{safe}':"
@@ -265,17 +287,72 @@ def watermark_video(src_path, dest_path, text=WATERMARK_TEXT):
          "-vf", vf, "-c:a", "copy", dest_path], timeout=600)
 
 
-def translate(worker_url, caption, image_texts, image_urls=()):
-    """POST pre-OCR'd texts to the Worker; it returns the translations.
+# Speech transcription for Cantonese subtitles (faster-whisper, local model
+# dir — HF downloads are proxy-blocked on this VM, so pre-fetch with curl).
+WHISPER_MODEL_DIR = os.path.expanduser(
+    "~/workspace/goals/hawley-ig-auto-translate-bot/models/faster-whisper-base.en")
+_whisper_model = None
+
+
+def transcribe_segments(video_path, model_dir=WHISPER_MODEL_DIR):
+    """faster-whisper -> [{start, end, text}]. Raises on failure."""
+    global _whisper_model
+    if _whisper_model is None:
+        from faster_whisper import WhisperModel
+        if not os.path.isdir(model_dir):
+            raise RuntimeError(f"whisper model not found: {model_dir}")
+        _whisper_model = WhisperModel(model_dir, device="cpu", compute_type="int8")
+    segments, _ = _whisper_model.transcribe(video_path, beam_size=5)
+    return [{"start": s.start, "end": s.end, "text": s.text.strip()}
+            for s in segments if s.text.strip()]
+
+
+def _srt_ts(sec):
+    ms = int(sec * 1000)
+    h, ms = divmod(ms, 3600000)
+    m, ms = divmod(ms, 60000)
+    s, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def write_srt(segments, path):
+    """segments: [{start, end, text}] (text already translated)."""
+    with open(path, "w", encoding="utf-8") as f:
+        for n, s in enumerate(segments, 1):
+            f.write(f"{n}\n{_srt_ts(s['start'])} --> {_srt_ts(s['end'])}\n"
+                    f"{s['text']}\n\n")
+
+
+def burn_subtitles(src_path, srt_path, dest_path, text):
+    """Burn Cantonese subtitles + watermark in one ffmpeg pass. Raises."""
+    safe = text.replace("\\", "\\\\").replace(":", "\\:").replace("'", "")
+    srt_esc = srt_path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "")
+    style = ("FontName=Noto Sans CJK HK,FontSize=20,PrimaryColour=&H00FFFFFF,"
+             "OutlineColour=&H80000000,BorderStyle=1,Outline=2,Shadow=0,"
+             "MarginV=80,Alignment=2")
+    vf = (f"subtitles='{srt_esc}':fontsdir='/usr/share/fonts/opentype/noto':"
+          f"force_style='{style}',"
+          f"drawtext=fontfile={WATERMARK_FONT_TTC}:text='{safe}':fontsize=h/28:"
+          f"x=(w-text_w)/2:y=h-text_h-20:fontcolor=white:box=1:"
+          f"boxcolor=black@0.55:boxborderw=12")
+    run(["ffmpeg", "-y", "-v", "error", "-i", src_path,
+         "-vf", vf, "-c:a", "copy", dest_path], timeout=900)
+
+
+def translate(worker_url, source, caption, image_texts, image_urls=(), segments=()):
+    """POST pre-OCR'd texts (and speech segments) to the Worker.
 
     image_urls is a fallback: for any image that arrived without OCR text
     (PaddleOCR unavailable on this runtime), the Worker OCRs the URL itself
-    with its vision model.
+    with its vision model. segments: [{text}] transcribed speech; the Worker
+    returns segments_zh aligned by index.
     """
     payload = json.dumps({
+        "source": source,
         "caption": caption,
         "image_texts": image_texts,
         "image_urls": list(image_urls),
+        "segments": [{"i": k, "text_en": s["text"]} for k, s in enumerate(segments)],
     }).encode()
     req = urllib.request.Request(
         worker_url.rstrip("/") + "/translate",
@@ -288,28 +365,35 @@ def translate(worker_url, caption, image_texts, image_urls=()):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Poll Hawley IG posts and queue translation drafts.")
+    ap = argparse.ArgumentParser(description="Poll IG posts and queue translation drafts.")
     ap.add_argument("--account-id", default=DEFAULT_ACCOUNT_ID)
-    ap.add_argument("--username", default=DEFAULT_USERNAME)
+    ap.add_argument("--source", default=DEFAULT_SOURCE, choices=sorted(SOURCES),
+                    help="which figure to poll (default: %(default)s)")
+    ap.add_argument("--username", default=None,
+                    help="override the source's IG username")
     ap.add_argument("--limit", type=int, default=20)
     ap.add_argument("--state-dir", default=DEFAULT_STATE_DIR)
     ap.add_argument("--worker-url", default=os.environ.get("HAWLEY_TRANSLATOR_URL", ""))
     ap.add_argument("--dry-run", action="store_true", help="list new posts without translating")
     args = ap.parse_args()
 
+    src = SOURCES[args.source]
+    username = args.username or src["username"]
+    watermark_text = src["watermark_text"]
+
     os.makedirs(args.state_dir, exist_ok=True)
     os.makedirs(os.path.join(args.state_dir, "images"), exist_ok=True)
-    wm_path = os.path.join(args.state_dir, "watermark.json")
-    q_path = os.path.join(args.state_dir, "review_queue.json")
+    wm_path = os.path.join(args.state_dir, f"watermark_{args.source}.json")
+    q_path = os.path.join(args.state_dir, f"review_queue_{args.source}.json")
     watermark = load_json(wm_path, {"seen_ids": [], "failures": {}})
     queue = load_json(q_path, [])
     seen = set(watermark.get("seen_ids", []))
     queued_ids = {d.get("post_id") for d in queue}
 
-    log(f"fetching latest {args.limit} posts from @{args.username}…")
+    log(f"fetching latest {args.limit} posts from @{username} ({src['label']})…")
     try:
         data = cli("posts", "--account-id", args.account_id,
-                   "--username", args.username, "--limit", str(args.limit),
+                   "--username", username, "--limit", str(args.limit),
                    "--post-types", "POST,REEL")
     except RuntimeError as e:
         log(f"ABORT: {e}")
@@ -364,7 +448,7 @@ def main():
                     download(mu, src)
                     src_paths.append(os.path.relpath(src, args.state_dir))
                     try:
-                        watermark_image(src, dest)
+                        watermark_image(src, dest, watermark_text)
                         local_paths.append(os.path.relpath(dest, args.state_dir))
                         wm_status = "ok"
                     except Exception as e:
@@ -375,22 +459,19 @@ def main():
                     log(f"  download failed for image {i}: {e}")
 
             # videos/reels: download the full mp4 (IG publishing needs the
-            # file — a URL is not enough) and burn in the watermark.
+            # file — a URL is not enough) and transcribe speech for subtitles.
             video_path, video_src, video_wm = "", "", "n/a"
+            segments_en = []
             if str(media_type).lower() in ("video", "reel") and post_url:
                 vsrc = os.path.join(img_dir, "clip_src.mp4")
-                vdest = os.path.join(img_dir, "clip.mp4")
                 try:
                     download_video(post_url, vsrc)
                     video_src = os.path.relpath(vsrc, args.state_dir)
                     try:
-                        watermark_video(vsrc, vdest)
-                        video_path = os.path.relpath(vdest, args.state_dir)
-                        video_wm = "ok"
-                        log(f"  video downloaded + watermarked")
+                        segments_en = transcribe_segments(vsrc)
+                        log(f"  transcribed {len(segments_en)} speech segments")
                     except Exception as e:
-                        log(f"  video watermark failed: {e}")
-                        video_path, video_wm = video_src, "failed"
+                        log(f"  transcription failed: {e}")
                 except Exception as e:
                     log(f"  video download failed: {e}")
 
@@ -415,10 +496,43 @@ def main():
 
             # Fallback: if PaddleOCR produced no text (unavailable on this
             # runtime), hand the URLs to the Worker so IT can OCR them.
-            result = translate(args.worker_url, caption_en, image_texts,
-                               image_urls=media_urls)
+            result = translate(args.worker_url, args.source, caption_en, image_texts,
+                               image_urls=media_urls, segments=segments_en)
+
+            # burn Cantonese subtitles + watermark into the video
+            sub_count = 0
+            if video_src:
+                vdest = os.path.join(img_dir, "clip.mp4")
+                seg_zh = result.get("segments_zh", []) or []
+                zh_by_i = {s.get("i"): s.get("text_zh", "") for s in seg_zh
+                           if isinstance(s, dict)}
+                subs = []
+                for k, s in enumerate(segments_en):
+                    t = zh_by_i.get(k, "")
+                    if t:
+                        subs.append({"start": s["start"], "end": s["end"], "text": t})
+                if subs:
+                    srt_path = os.path.join(img_dir, "subs.srt")
+                    write_srt(subs, srt_path)
+                    try:
+                        burn_subtitles(vsrc, srt_path, vdest, watermark_text)
+                        video_path = os.path.relpath(vdest, args.state_dir)
+                        video_wm, sub_count = "subtitled", len(subs)
+                        log(f"  burned {len(subs)} Cantonese subtitles + watermark")
+                    except Exception as e:
+                        log(f"  subtitle burn-in failed: {e}")
+                if not video_path:
+                    # no subtitles (or burn failed): watermark only
+                    try:
+                        watermark_video(vsrc, vdest, watermark_text)
+                        video_path = os.path.relpath(vdest, args.state_dir)
+                        video_wm = "ok"
+                    except Exception as e:
+                        log(f"  video watermark failed: {e}")
+                        video_path, video_wm = video_src, "failed"
 
             draft = {
+                "source": args.source,
                 "post_id": post_id,
                 "shortcode": shortcode,
                 "url": post_url,
@@ -433,6 +547,7 @@ def main():
                 "video_local_path": video_path,
                 "video_src_path": video_src,
                 "video_watermark": video_wm,
+                "subtitle_segments": sub_count,
                 "warnings": result.get("warnings", []),
                 "queued_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             }

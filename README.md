@@ -1,9 +1,10 @@
 # hawley-translator
 
-Auto-translation pipeline for the Instagram fan account
-[@snhawleytranslatorhkunofficial](https://www.instagram.com/snhawleytranslatorhkunofficial),
-which publishes Traditional Chinese (Hong Kong style) translations of
-US Senator Josh Hawley's posts ([@senatorhawley](https://www.instagram.com/senatorhawley)).
+Multi-source Instagram auto-translation pipeline producing Traditional
+Chinese (Hong Kong style) translations for the translator fan accounts:
+
+- [@snhawleytranslatorhkunofficial](https://www.instagram.com/snhawleytranslatorhkunofficial) — translations of US Senator Josh Hawley's posts ([@senatorhawley](https://www.instagram.com/senatorhawley)).
+- Trump translator account (handle TBD — Hector to create) — translations of Donald Trump's posts ([@realdonaldtrump](https://www.instagram.com/realdonaldtrump)).
 
 Scope: **post caption + text visible in images**. No video transcription (yet).
 
@@ -21,10 +22,10 @@ Scope: **post caption + text visible in images**. No video transcription (yet).
 │                  │      │                         │      │  reads               │
 │  1. instagram-cli│ POST │  4. translate caption   │ JSON │  review_queue.json   │
 │     reads latest │─────▶│     + OCR text via      │─────▶│  + downloaded media  │
-│     @senatorhawley│/trans│     Workers AI LLM into │      │                      │
-│     posts (newer │ late │     Traditional Chinese │      │  approves → publish  │
-│     than watermark│      │     (HK 書面語，霍利)    │      │  manually (IG app    │
-│                  │      │                         │      │  or future poster)  │
+│     source posts │/trans│     Workers AI LLM into │      │                      │
+│     (`--source  │ late │     Traditional Chinese │      │  approves → publish  │
+│     hawley|trump│      │     (HK 書面語；per-    │      │  manually (IG app    │
+│     newer than  │      │     source name rules)  │      │  or future poster)  │
 │  2. resolve image│      │  No DB, no secrets,     │      │                      │
 │     via oEmbed   │      │  no posting. OCR only   │      │                      │
 │  3. OCR: Paddle- │      │  as fallback when the   │      │                      │
@@ -56,8 +57,9 @@ Data flow per new post:
    so image text is still extracted either way. The draft records which tier
    produced the text (via `warnings`).
 4. **Translate** — caption + OCR'd texts are POSTed to the Worker's
-   `/translate`, which returns Traditional Chinese (HK 書面語，霍利 for
-   Hawley, @mentions/#hashtags kept, line breaks preserved).
+   `/translate` with the source name; the Worker returns Traditional Chinese
+   (HK 書面語, per-source name rules: 霍利 for Hawley, 特朗普 for Trump;
+   @mentions/#hashtags kept, line breaks preserved).
 5. **Queue** — media is downloaded and watermarked (images: PIL bottom bar;
    videos: full mp4 via yt-dlp + ffmpeg drawtext burn-in; originals kept as
    `src*`, watermarked `img*`/`clip*` is what gets published), the draft
@@ -88,22 +90,39 @@ python3 -m venv ~/workspace/goals/hawley-ig-auto-translate-bot/.venv-ocr
 # every 4 hours: poll, OCR, translate, queue drafts for review
 0 */4 * * * HAWLEY_TRANSLATOR_URL=https://hawley-translator.<acct>.workers.dev \
   ~/workspace/goals/hawley-ig-auto-translate-bot/.venv-ocr/bin/python \
-  /path/to/hawley-translator/scripts/poll.py \
+  /path/to/hawley-translator/scripts/poll.py --source hawley \
   --state-dir ~/workspace/goals/hawley-ig-auto-translate-bot/hidden_files \
   >> ~/workspace/goals/hawley-ig-auto-translate-bot/hidden_files/poll.log 2>&1
+
+# same for Trump (separate watermark + review queue files per source)
+30 */4 * * * HAWLEY_TRANSLATOR_URL=https://hawley-translator.<acct>.workers.dev \
+  ~/workspace/goals/hawley-ig-auto-translate-bot/.venv-ocr/bin/python \
+  /path/to/hawley-translator/scripts/poll.py --source trump \
+  --state-dir ~/workspace/goals/hawley-ig-auto-translate-bot/hidden_files \
+  >> ~/workspace/goals/hawley-ig-auto-translate-bot/hidden_files/poll_trump.log 2>&1
 ```
 
 Dry run first (lists new posts, translates nothing):
 
 ```bash
-~/workspace/goals/hawley-ig-auto-translate-bot/.venv-ocr/bin/python scripts/poll.py --dry-run
+~/workspace/goals/hawley-ig-auto-translate-bot/.venv-ocr/bin/python scripts/poll.py --dry-run            # hawley
+~/workspace/goals/hawley-ig-auto-translate-bot/.venv-ocr/bin/python scripts/poll.py --source trump --dry-run  # trump
 ```
 
 ## Still needed (not done by this scaffold)
 
+- [ ] **Hector creates the Trump translator IG account** (provisional
+      handle in the code: `@trumptranslatorhkunofficial`; display name
+      suggestion: 美國特朗普總統香港翻譯(非官方)). Once created, confirm the
+      handle so `SOURCES["trump"]["watermark_text"]` can be finalized —
+      the handle is burned into every published image/video.
 - [ ] **Hector links `@snhawleytranslatorhkunofficial` to Muse** in Meta
       Accounts Center (today only `@realufo_org` is linked, so nothing can be
-      published to the translator account yet).
+      published to the translator account yet). Note: Meta allows only ONE
+      Meta account per Accounts Center and the slot is taken by the
+      load-bearing `@realufo_org` link (poller reads sources through it) —
+      the new Trump account will hit the same wall; expect manual posting
+      from the IG app for both accounts.
 - [ ] **Explicit approval before ANY live auto-posting.** Publishing = sending
       as Hector; per his standing rules this needs his explicit go-ahead.
       The pipeline is intentionally review-gated until then.
