@@ -388,15 +388,44 @@ def translate(worker_url, source, caption, image_texts, image_urls=(),
         "image_texts": image_texts,
         "image_urls": list(image_urls),
         "segments": [{"i": k, "text_en": s["text"]} for k, s in enumerate(segments)],
-    }).encode()
-    req = urllib.request.Request(
-        worker_url.rstrip("/") + "/translate",
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=120) as r:
-        return json.loads(r.read().decode())
+    })
+    url = worker_url.rstrip("/") + "/translate"
+    # NOTE 2026-10-05: do NOT use urllib here. The egress proxy truncates
+    # urllib's reads of Worker responses (IncompleteRead on ~6-15KB bodies)
+    # while curl fetches the identical URL+payload reliably — verified
+    # side-by-side (curl 200/9225 bytes vs urllib IncompleteRead, same 52s).
+    # The proxy also 403s Python-urllib's default UA, hence the -A flag.
+    # The Worker is a pure function of its input, so retries are safe;
+    # 4xx (other than 429) is a real client error — don't retry those.
+    last_err = None
+    for attempt in range(4):
+        try:
+            p = subprocess.run(
+                ["curl", "-s", "-m", "180", "-w", "\nHTTP_CODE:%{http_code}",
+                 "-X", "POST", url,
+                 "-H", "Content-Type: application/json",
+                 "-A", "Mozilla/5.0 (Linux; Android 14)",
+                 "--data-binary", "@-"],
+                input=payload.encode(), capture_output=True, timeout=200,
+            )
+            if p.returncode != 0:
+                last_err = f"curl exit {p.returncode}: " + p.stderr.decode()[:200]
+            else:
+                out = p.stdout.decode()
+                body, _, code_line = out.rpartition("\nHTTP_CODE:")
+                code = int(code_line.strip() or 0)
+                if code == 200:
+                    return json.loads(body)
+                last_err = f"HTTP {code}: {body[:200]}"
+                if not (code == 429 or 500 <= code < 600):
+                    raise RuntimeError(f"worker /translate rejected: {last_err}")
+        except RuntimeError:
+            raise
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+        log(f"  worker call failed (attempt {attempt + 1}/4): {last_err}; retrying…")
+        time.sleep(5 * (attempt + 1))
+    raise RuntimeError(f"worker /translate failed after 4 attempts: {last_err}")
 
 
 def main():
@@ -490,18 +519,21 @@ def main():
             wm_status = "n/a"
             for i, mu in enumerate(media_urls):
                 ext = ".png" if ".png" in mu.split("?")[0] else ".jpg"
-                src = os.path.join(img_dir, f"src{i}{ext}")
+                # NOTE: named src_path, NOT src — src is the SOURCES[args.source]
+                # dict used later for src['username'] (shadowed here 2026-10-05,
+                # broke every draft with "string indices must be integers").
+                src_path = os.path.join(img_dir, f"src{i}{ext}")
                 dest = os.path.join(img_dir, f"img{i}{ext}")
                 try:
-                    download(mu, src)
-                    src_paths.append(os.path.relpath(src, args.state_dir))
+                    download(mu, src_path)
+                    src_paths.append(os.path.relpath(src_path, args.state_dir))
                     try:
-                        watermark_image(src, dest, watermark_text)
+                        watermark_image(src_path, dest, watermark_text)
                         local_paths.append(os.path.relpath(dest, args.state_dir))
                         wm_status = "ok"
                     except Exception as e:
                         log(f"  watermark failed for image {i}: {e}")
-                        local_paths.append(os.path.relpath(src, args.state_dir))
+                        local_paths.append(os.path.relpath(src_path, args.state_dir))
                         wm_status = "failed"
                 except Exception as e:
                     log(f"  download failed for image {i}: {e}")
@@ -641,7 +673,8 @@ def main():
                 log("  giving up on this post; marking seen to avoid a poison loop")
                 seen.add(post_id)
         except Exception as e:  # noqa: BLE001 — never let one post kill the run
-            log(f"  UNEXPECTED: {e}")
+            import traceback
+            log(f"  UNEXPECTED: {e}\n{traceback.format_exc()}")
 
     watermark["seen_ids"] = sorted(seen)[-SEEN_CAP:]
     watermark["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")

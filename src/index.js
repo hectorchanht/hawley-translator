@@ -118,42 +118,44 @@ async function ocrImage(env, url) {
 function buildTranslationPrompt(caption, imageTexts, segments, source) {
   const nameRule = SOURCE_NAME_RULES[source] || "";
   const mainTag = SOURCE_MAIN_TAG[source] || "#翻譯";
-  const parts = [
+  // NOTE 2026-10-05: the old prompt listed segments as "SPEECH N:" blocks and
+  // the model pattern-completed them (emitting "SPEECH 17: <english>" instead
+  // of JSON, in English instead of Chinese). Input is now JSON and the
+  // response-format instruction sits at the very END, right before output.
+  const rules = [
     "You are a professional translator writing for a Hong Kong audience.",
-    "Translate the English content below into Traditional Chinese, Hong Kong written style (書面語，繁體中文).",
-    "Rules:",
-  ];
-  if (nameRule) parts.push(nameRule);
-  parts.push(
+    "Translate the English content in INPUT below into Traditional Chinese, Hong Kong written style (書面語，繁體中文).",
+    "STRICT RULES:",
+    "- Translate ONLY what is in INPUT. Do NOT add commentary, explanations, background, people, events, or any content not present in the source.",
     "- Keep @mentions (e.g. @senatorhawley) and #hashtags unchanged.",
     "- Preserve line breaks and paragraph structure.",
-    "- Be faithful and concise. Do not add commentary, explanations, or extra content.",
+    "- Be faithful and concise.",
     "- If a segment is empty, return an empty string for it.",
-    "- SPEECH segments become burned-in video subtitles: keep each one short " +
+    "- \"segments\" become burned-in video subtitles: keep each one short " +
       "(one line, under 20 Chinese characters when possible), Cantonese-flavoured " +
       "where natural (嘅, 咁, 係, 唔), faithful to the spoken meaning.",
-    "- SEO: also produce:",
+    "- Also produce:",
     '  - "seo_hook": one punchy Instagram opening line (under 50 Chinese characters, ' +
-      "Cantonese-flavoured, may start with ONE emoji), capturing the most newsworthy point.",
+      "Cantonese-flavoured, may start with ONE emoji), capturing the most newsworthy point " +
+      "from the source material only.",
     '  - "seo_hashtags": 5-8 hashtags as JSON strings, each starting with #. Mix Traditional ' +
       `Chinese tags (e.g. ${mainTag}) and English tags (e.g. #JoshHawley). Always include ${mainTag}. ` +
       "Topical and HK-audience relevant; never generic spam like #love or #instagood.",
-    "",
-    "Return ONLY valid JSON, no markdown fences, with this exact shape:",
+  ];
+  if (nameRule) rules.push("- " + nameRule);
+  const input = {
+    caption: caption || "",
+    image_texts: imageTexts.map((t) => t || ""),
+    segments: segments.map((s) => ({ i: s.i, text_en: s.text_en || "" })),
+  };
+  return rules.join("\n") +
+    "\n\nINPUT (JSON):\n" + JSON.stringify(input) +
+    '\n\nReturn ONLY a JSON object with EXACTLY these keys — no markdown fences, ' +
+    "no commentary before or after:\n" +
     '{"caption_zh": "...", "image_texts_zh": ["...", "..."], ' +
-      '"segments_zh": [{"i": 0, "text_zh": "..."}], ' +
-      '"seo_hook": "...", "seo_hashtags": ["#..."]}',
-    "",
-    "CAPTION:",
-    caption || "",
-  );
-  imageTexts.forEach((t, i) => {
-    parts.push("", `IMAGE ${i + 1} TEXT:`, t || "");
-  });
-  segments.forEach((s) => {
-    parts.push("", `SPEECH ${s.i}:`, s.text_en || "");
-  });
-  return parts.join("\n");
+    '"segments_zh": [{"i": 0, "text_zh": "..."}], ' +
+    '"seo_hook": "...", "seo_hashtags": ["#..."]}' +
+    "\n\nYOUR JSON RESPONSE:";
 }
 
 // English-target prompt: no translation — just an SEO hook + hashtags for
