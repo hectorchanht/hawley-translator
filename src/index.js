@@ -23,6 +23,8 @@
  * POST /translate body:
  *   {
  *     "caption": "English caption text",
+ *     "source": "hawley" | "trump",        // per-source name rules
+ *     "target": "zh-Hant" | "en",           // en = no translation, English SEO only
  *     "image_texts": [                       // preferred: pre-OCR'd
  *       { "url": "images/<sc>/img0.jpg", "text_en": "OCR'd English text" }
  *     ],
@@ -34,12 +36,12 @@
  *
  * Response:
  *   {
- *     "caption_zh": "繁體中文翻譯…",
+ *     "caption_zh": "繁體中文翻譯…",          // "" when target=en
  *     "image_texts": [
  *       { "url": "…", "text_en": "…", "text_zh": "翻譯…" }
  *     ],
  *     "segments_zh": [ { "i": 0, "text_zh": "翻譯…" } ],
- *     "seo_hook_zh": "IG 開場 hook…",
+ *     "seo_hook": "IG opening hook (target language)…",
  *     "seo_hashtags": ["#霍利", "#JoshHawley", …],
  *     "warnings": ["…"]   // empty when everything worked
  *   }
@@ -66,6 +68,12 @@ const SOURCE_NAME_RULES = {
 const SOURCE_MAIN_TAG = {
   hawley: "#霍利",
   trump: "#特朗普",
+};
+
+// English anchor tags for the "en" target (original clips, English SEO).
+const SOURCE_MAIN_TAG_EN = {
+  hawley: "#JoshHawley",
+  trump: "#DonaldTrump",
 };
 
 function extractJson(raw) {
@@ -121,7 +129,7 @@ function buildTranslationPrompt(caption, imageTexts, segments, source) {
       "(one line, under 20 Chinese characters when possible), Cantonese-flavoured " +
       "where natural (嘅, 咁, 係, 唔), faithful to the spoken meaning.",
     "- SEO: also produce:",
-    '  - "seo_hook_zh": one punchy Instagram opening line (under 50 Chinese characters, ' +
+    '  - "seo_hook": one punchy Instagram opening line (under 50 Chinese characters, ' +
       "Cantonese-flavoured, may start with ONE emoji), capturing the most newsworthy point.",
     '  - "seo_hashtags": 5-8 hashtags as JSON strings, each starting with #. Mix Traditional ' +
       `Chinese tags (e.g. ${mainTag}) and English tags (e.g. #JoshHawley). Always include ${mainTag}. ` +
@@ -130,7 +138,7 @@ function buildTranslationPrompt(caption, imageTexts, segments, source) {
     "Return ONLY valid JSON, no markdown fences, with this exact shape:",
     '{"caption_zh": "...", "image_texts_zh": ["...", "..."], ' +
       '"segments_zh": [{"i": 0, "text_zh": "..."}], ' +
-      '"seo_hook_zh": "...", "seo_hashtags": ["#..."]}',
+      '"seo_hook": "...", "seo_hashtags": ["#..."]}',
     "",
     "CAPTION:",
     caption || "",
@@ -140,6 +148,31 @@ function buildTranslationPrompt(caption, imageTexts, segments, source) {
   });
   segments.forEach((s) => {
     parts.push("", `SPEECH ${s.i}:`, s.text_en || "");
+  });
+  return parts.join("\n");
+}
+
+// English-target prompt: no translation — just an SEO hook + hashtags for
+// the English-speaking audience account (original clips, watermarked).
+function buildEnglishSeoPrompt(caption, imageTexts, source) {
+  const mainTag = SOURCE_MAIN_TAG_EN[source] || "#Politics";
+  const parts = [
+    "You are a social media editor writing for an English-speaking Instagram audience.",
+    "Given the Instagram caption (and any text visible in its images) below, produce:",
+    '- "seo_hook": one punchy opening line (under 120 characters, may start with ONE emoji), ' +
+      "capturing the most newsworthy point. No hashtags inside the hook.",
+    `- "seo_hashtags": 5 to 8 English hashtags as JSON strings, each starting with #. ` +
+      `Always include ${mainTag}. Topical and specific (US politics, AI regulation, ` +
+      "the people named); never generic spam like #love or #instagood.",
+    "",
+    "Return ONLY valid JSON, no markdown fences, with this exact shape:",
+    '{"seo_hook": "...", "seo_hashtags": ["#..."]}',
+    "",
+    "CAPTION:",
+    caption || "",
+  ];
+  imageTexts.forEach((t, i) => {
+    parts.push("", `IMAGE ${i + 1} TEXT:`, t || "");
   });
   return parts.join("\n");
 }
@@ -155,6 +188,7 @@ async function handleTranslate(request, env) {
 
   const caption = typeof body.caption === "string" ? body.caption : "";
   const source = typeof body.source === "string" ? body.source : "hawley";
+  const target = body.target === "en" ? "en" : "zh-Hant";
   const inTexts = Array.isArray(body.image_texts) ? body.image_texts : [];
   const inUrls = (Array.isArray(body.image_urls) ? body.image_urls : [])
     .filter((u) => typeof u === "string" && u.startsWith("http"));
@@ -190,6 +224,37 @@ async function handleTranslate(request, env) {
 
   const prompt = buildTranslationPrompt(caption, slots.map((s) => s.text_en), inSegs, source);
   const mainTag = SOURCE_MAIN_TAG[source] || "#翻譯";
+
+  // English target: no translation — original clips for English speakers.
+  // One cheap model call for the SEO hook + hashtags only.
+  if (target === "en") {
+    let seoHook = "";
+    let seoTags = [];
+    try {
+      const out = await env.AI.run(TEXT_MODEL, {
+        prompt: buildEnglishSeoPrompt(caption, slots.map((s) => s.text_en), source),
+        max_tokens: 512,
+      });
+      const parsed = extractJson(String(out?.response ?? ""));
+      seoHook = typeof parsed.seo_hook === "string" ? parsed.seo_hook : "";
+      const tagList = Array.isArray(parsed.seo_hashtags) ? parsed.seo_hashtags : [];
+      seoTags = tagList.filter((t) => typeof t === "string" && t.startsWith("#")).slice(0, 10);
+    } catch (e) {
+      warnings.push(`english SEO failed: ${String(e?.message || e).slice(0, 200)}`);
+    }
+    const mainTagEn = SOURCE_MAIN_TAG_EN[source] || "#Politics";
+    if (seoTags.length && !seoTags.includes(mainTagEn)) seoTags.unshift(mainTagEn);
+    slots.forEach((s) => { s.text_zh = s.text_en; });
+    return Response.json({
+      caption_zh: "",
+      image_texts: slots,
+      segments_zh: [],
+      seo_hook: seoHook,
+      seo_hashtags: seoTags,
+      warnings,
+    });
+  }
+
   let captionZh = "";
   let segmentsZh = [];
   let seoHook = "";
@@ -211,7 +276,7 @@ async function handleTranslate(request, env) {
       const segByI = new Map(segList.filter((s) => s && typeof s.i === "number")
         .map((s) => [s.i, typeof s.text_zh === "string" ? s.text_zh : ""]));
       segmentsZh = inSegs.map((s) => ({ i: s.i, text_zh: segByI.get(s.i) ?? "" }));
-      seoHook = typeof parsed.seo_hook_zh === "string" ? parsed.seo_hook_zh : "";
+      seoHook = typeof parsed.seo_hook === "string" ? parsed.seo_hook : "";
       const tagList = Array.isArray(parsed.seo_hashtags) ? parsed.seo_hashtags : [];
       seoTags = tagList.filter((t) => typeof t === "string" && t.startsWith("#")).slice(0, 10);
       if (seoTags.length && !seoTags.includes(mainTag)) seoTags.unshift(mainTag);
@@ -228,7 +293,7 @@ async function handleTranslate(request, env) {
     caption_zh: captionZh,
     image_texts: slots,
     segments_zh: segmentsZh,
-    seo_hook_zh: seoHook,
+    seo_hook: seoHook,
     seo_hashtags: seoTags,
     warnings,
   });

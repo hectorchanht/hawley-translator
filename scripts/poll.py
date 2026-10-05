@@ -5,6 +5,13 @@ hawley-translator Cloudflare Worker, and queue drafts for HUMAN REVIEW.
 Sources are configured in SOURCES (--source hawley|trump, default hawley);
 each source gets its own watermark + review-queue state files.
 
+Targets (--target zh|en, default zh):
+  zh: translate to Traditional Chinese for the HK audience (watermarked
+      "non-official translation" account), Cantonese subtitles on videos.
+  en: original English clips for English-speaking users (new IG account):
+      no translation, no subtitles — watermark + English SEO hook/hashtags.
+      Review queue kept separate (review_queue_<source>_en.json).
+
 Scope: post caption + text visible in images (no video transcription).
 
 Media: every image is downloaded and burned with a translation watermark
@@ -62,6 +69,10 @@ SOURCES = {
         "username": "senatorhawley",
         "label": "Josh Hawley",
         "watermark_text": "非官方中文翻譯 · @snhawleytranslatorhkunofficial",
+        # PROVISIONAL — Hector hasn't created the English clips account yet;
+        # update once the real handle exists (one shared EN account for all
+        # sources; images/clips are burned with it).
+        "watermark_text_en": "Clips · @hawleytrumpclips",
     },
     "trump": {
         "username": "realdonaldtrump",
@@ -70,6 +81,8 @@ SOURCES = {
         # update this handle once the real one exists (images are burned
         # with it, so re-queue any already-processed drafts after a rename).
         "watermark_text": "非官方中文翻譯 · @trumptranslatorhkunofficial",
+        # PROVISIONAL — same shared English clips account as hawley.
+        "watermark_text_en": "Clips · @hawleytrumpclips",
     },
 }
 SHORTCODE_RE = re.compile(r"instagram\.com/(?:p|reel|reels)/([^/?#]+)")
@@ -356,16 +369,19 @@ def burn_subtitles(src_path, srt_path, dest_path, text):
          "-vf", vf, "-c:a", "copy", dest_path], timeout=900)
 
 
-def translate(worker_url, source, caption, image_texts, image_urls=(), segments=()):
+def translate(worker_url, source, caption, image_texts, image_urls=(),
+              segments=(), target="zh"):
     """POST pre-OCR'd texts (and speech segments) to the Worker.
 
     image_urls is a fallback: for any image that arrived without OCR text
     (PaddleOCR unavailable on this runtime), the Worker OCRs the URL itself
     with its vision model. segments: [{text}] transcribed speech; the Worker
-    returns segments_zh aligned by index.
+    returns segments_zh aligned by index. target "en" skips translation and
+    returns English SEO (hook + hashtags) only.
     """
     payload = json.dumps({
         "source": source,
+        "target": target,
         "caption": caption,
         "image_texts": image_texts,
         "image_urls": list(image_urls),
@@ -386,6 +402,10 @@ def main():
     ap.add_argument("--account-id", default=DEFAULT_ACCOUNT_ID)
     ap.add_argument("--source", default=DEFAULT_SOURCE, choices=sorted(SOURCES),
                     help="which figure to poll (default: %(default)s)")
+    ap.add_argument("--target", default="zh", choices=("zh", "en"),
+                    help="zh: translate to Traditional Chinese (default); "
+                         "en: original English clips + English SEO for the "
+                         "English-speaking audience account")
     ap.add_argument("--username", default=None,
                     help="override the source's IG username")
     ap.add_argument("--limit", type=int, default=20)
@@ -396,19 +416,21 @@ def main():
 
     src = SOURCES[args.source]
     username = args.username or src["username"]
-    watermark_text = src["watermark_text"]
+    watermark_text = src["watermark_text_en" if args.target == "en" else "watermark_text"]
 
     os.makedirs(args.state_dir, exist_ok=True)
     os.makedirs(os.path.join(args.state_dir, "images"), exist_ok=True)
-    # Backwards compatible: hawley keeps the original state filenames (the
+    # Backwards compatible: hawley/zh keeps the original state filenames (the
     # Zapier "hawley review drafter" skill reads review_queue.json); other
-    # sources get suffixed filenames.
-    if args.source == "hawley":
+    # sources get suffixed filenames. The en target always gets an _en
+    # suffix so its drafts never mix with the Chinese queue.
+    if args.source == "hawley" and args.target == "zh":
         wm_path = os.path.join(args.state_dir, "watermark.json")
         q_path = os.path.join(args.state_dir, "review_queue.json")
     else:
-        wm_path = os.path.join(args.state_dir, f"watermark_{args.source}.json")
-        q_path = os.path.join(args.state_dir, f"review_queue_{args.source}.json")
+        suffix = f"{args.source}_en" if args.target == "en" else args.source
+        wm_path = os.path.join(args.state_dir, f"watermark_{suffix}.json")
+        q_path = os.path.join(args.state_dir, f"review_queue_{suffix}.json")
     watermark = load_json(wm_path, {"seen_ids": [], "failures": {}})
     queue = load_json(q_path, [])
     seen = set(watermark.get("seen_ids", []))
@@ -483,7 +505,8 @@ def main():
                     log(f"  download failed for image {i}: {e}")
 
             # videos/reels: download the full mp4 (IG publishing needs the
-            # file — a URL is not enough) and transcribe speech for subtitles.
+            # file — a URL is not enough). zh target also transcribes speech
+            # for Cantonese subtitles; en target posts the original as-is.
             video_path, video_src, video_wm = "", "", "n/a"
             segments_en = []
             if str(media_type).lower() in ("video", "reel") and post_url:
@@ -491,17 +514,19 @@ def main():
                 try:
                     download_video(post_url, vsrc)
                     video_src = os.path.relpath(vsrc, args.state_dir)
-                    try:
-                        segments_en = transcribe_segments(vsrc)
-                        log(f"  transcribed {len(segments_en)} speech segments")
-                    except Exception as e:
-                        log(f"  transcription failed: {e}")
+                    if args.target == "zh":
+                        try:
+                            segments_en = transcribe_segments(vsrc)
+                            log(f"  transcribed {len(segments_en)} speech segments")
+                        except Exception as e:
+                            log(f"  transcription failed: {e}")
                 except Exception as e:
                     log(f"  video download failed: {e}")
 
-            # OCR with PaddleOCR (same engine as realufo.org's crawler)
+            # OCR with PaddleOCR (same engine as realufo.org's crawler).
+            # en target needs no OCR — image text is already English.
             image_texts = []
-            if local_paths:
+            if local_paths and args.target == "zh":
                 try:
                     ocr = paddle_ocr()
                 except RuntimeError as e:
@@ -520,8 +545,10 @@ def main():
 
             # Fallback: if PaddleOCR produced no text (unavailable on this
             # runtime), hand the URLs to the Worker so IT can OCR them.
+            # (en target: Worker returns English SEO only, no translation.)
             result = translate(args.worker_url, args.source, caption_en, image_texts,
-                               image_urls=media_urls, segments=segments_en)
+                               image_urls=media_urls, segments=segments_en,
+                               target=args.target)
 
             # burn Cantonese subtitles + watermark into the video
             sub_count = 0
@@ -555,16 +582,21 @@ def main():
                         log(f"  video watermark failed: {e}")
                         video_path, video_wm = video_src, "failed"
 
-            seo_hook = result.get("seo_hook_zh", "")
+            seo_hook = result.get("seo_hook", "")
             seo_tags = result.get("seo_hashtags", []) or []
-            post_bits = [b for b in [seo_hook, result.get("caption_zh", "")] if b]
-            if sub_count:
-                post_bits.append("🎙️ 片中已燒錄廣東話字幕")
-            post_bits.append(f"⚠️ 非官方中文翻譯，原文以 @{src['username']} 為準")
+            caption_out = result.get("caption_zh", "") if args.target == "zh" else caption_en
+            post_bits = [b for b in [seo_hook, caption_out] if b]
+            if args.target == "zh":
+                if sub_count:
+                    post_bits.append("🎙️ 片中已燒錄廣東話字幕")
+                post_bits.append(f"⚠️ 非官方中文翻譯，原文以 @{src['username']} 為準")
+            else:
+                post_bits.append(f"📎 Via @{src['username']}")
             if seo_tags:
                 post_bits.append(" ".join(seo_tags))
             draft = {
                 "source": args.source,
+                "target": args.target,
                 "post_id": post_id,
                 "shortcode": shortcode,
                 "url": post_url,
@@ -572,9 +604,9 @@ def main():
                 "created_at": created,
                 "caption_en": caption_en,
                 "caption_zh": result.get("caption_zh", ""),
-                "seo_hook_zh": seo_hook,
+                "seo_hook": seo_hook,
                 "seo_hashtags": seo_tags,
-                "suggested_post_zh": "\n\n".join(post_bits),
+                "suggested_post": "\n\n".join(post_bits),
                 "image_texts": result.get("image_texts", []),
                 "image_local_paths": local_paths,
                 "image_src_paths": src_paths,
@@ -593,7 +625,8 @@ def main():
             seen.add(post_id)
             watermark["failures"].pop(post_id, None)
             processed += 1
-            log(f"  queued draft ({len(caption_en)} en chars -> {len(draft['caption_zh'])} zh chars)")
+            log(f"  queued draft [{args.target}] ({len(caption_en)} en chars"
+                + (f" -> {len(draft['caption_zh'])} zh chars" if args.target == "zh" else ""))
             time.sleep(2)  # be gentle with the APIs
         except RuntimeError as e:
             if "RATE_LIMITED" in str(e):
