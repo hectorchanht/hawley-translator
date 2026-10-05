@@ -69,11 +69,11 @@ SOURCES = {
         "username": "senatorhawley",
         "label": "Josh Hawley",
         "watermark_text": "非官方中文翻譯 · @snhawleytranslatorhkunofficial",
-        # English clips account: @globeshorts (handle decided 2026-10-05;
+        # English clips account: @dailynewsshorts (handle decided 2026-10-05;
         # one shared account for all sources; Hector to create it).
         # Images/clips are burned with it, so set this before any en
         # drafts get processed.
-        "watermark_text_en": "Clips · @globeshorts",
+        "watermark_text_en": "Clips · @dailynewsshorts",
     },
     "trump": {
         "username": "realdonaldtrump",
@@ -82,9 +82,9 @@ SOURCES = {
         # update this handle once the real one exists (images are burned
         # with it, so re-queue any already-processed drafts after a rename).
         "watermark_text": "非官方中文翻譯 · @trumptranslatorhkunofficial",
-        # Same shared English clips account as hawley: @globeshorts
+        # Same shared English clips account as hawley: @dailynewsshorts
         # (handle decided 2026-10-05; Hector to create it).
-        "watermark_text_en": "Clips · @globeshorts",
+        "watermark_text_en": "Clips · @dailynewsshorts",
     },
 }
 SHORTCODE_RE = re.compile(r"instagram\.com/(?:p|reel|reels)/([^/?#]+)")
