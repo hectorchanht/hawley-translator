@@ -84,10 +84,28 @@ function extractJson(raw) {
   const cleaned = String(raw)
     .replace(/^```(?:json)?\s*/i, "")
     .replace(/\s*```\s*$/, "");
+  // The model sometimes emits the JSON twice (plain + fenced copy) or trails
+  // garbage. Grab the FIRST complete top-level object via brace matching
+  // instead of first-"{" to last-"}" (2026-10-05: that broke on double emission).
   const start = cleaned.indexOf("{");
-  const end = cleaned.lastIndexOf("}");
-  if (start === -1 || end === -1) throw new Error("no JSON object in model output");
-  return JSON.parse(cleaned.slice(start, end + 1));
+  if (start === -1) throw new Error("no JSON object in model output");
+  let depth = 0, inStr = false, esc = false;
+  for (let i = start; i < cleaned.length; i++) {
+    const c = cleaned[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+    } else if (c === '"') {
+      inStr = true;
+    } else if (c === "{") {
+      depth++;
+    } else if (c === "}") {
+      depth--;
+      if (depth === 0) return JSON.parse(cleaned.slice(start, i + 1));
+    }
+  }
+  throw new Error("no complete JSON object in model output");
 }
 
 async function ocrImage(env, url) {
