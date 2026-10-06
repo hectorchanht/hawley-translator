@@ -443,59 +443,108 @@ def _parse_srt(path):
     return cues
 
 
-def burn_subtitles(src_path, srt_path, dest_path, text, sub_pos="bottom"):
+def _split_cue(line, max_chars=14):
+    """Split a long cue into two centred lines at a natural break."""
+    if len(line) <= max_chars:
+        return [line]
+    best = -1
+    for i, c in enumerate(line):
+        if c in "\uff0c\u3001\uff1b\uff1a" and \
+                abs(i - len(line) / 2) < abs(best - len(line) / 2):
+            best = i
+    if best > 0:
+        return [line[:best + 1].strip(), line[best + 1:].strip()]
+    mid = len(line) // 2
+    return [line[:mid].strip(), line[mid:].strip()]
+
+
+def burn_subtitles(src_path, srt_path, dest_path, text, sub_pos="bottom",
+                   caption_style="outline", watermark_mode="full"):
     """Burn Cantonese subtitles + watermark in one ffmpeg pass. Raises.
 
-    Subtitles are drawtext cues (realufo.org showcase style): bold white CJK,
-    thick black outline + drop shadow, centred, timed with enable=between().
-    Pixel-exact positioning — no libass/ASS scaling surprises.
-    sub_pos: "top" (below the top edge, for sources with big burned-in
-    captions) or "bottom" (above the watermark block).
+    Subtitles are drawtext cues (realufo.org showcase style): centred, timed
+    with enable=between(). Pixel-exact positioning — no libass/ASS scaling
+    surprises.
+    caption_style:
+      "outline" — bold white CJK, black outline + shadow (default);
+      "box"     — white box + navy text, matching sources whose own captions
+                  are white boxes (e.g. Hawley "Declaration for Life" reel).
+    sub_pos: "top" (below the top edge) or "bottom" (above the watermark).
+    watermark_mode:
+      "full" — the two-line bold watermark block;
+      "tiny" — one super-small disclaimer line at the very bottom, for when
+               the Cantonese caption itself is the prominent bottom element.
     """
     import tempfile
     w, h = _video_dims(src_path)
     cues = _parse_srt(srt_path)
-    sub_fs = max(28, int(w * 0.064))
-    sub_y = int(h * 0.09) if sub_pos == "top" else h - int(h * 0.24)
-    border = max(3, sub_fs // 13)
+    sc = h / 1280.0  # scale factor for non-1280 heights
     filters = []
     tmpfiles = []
-    for n, (a, b, line) in enumerate(cues):
-        line = line.strip()
-        if not line:
-            continue
-        # long cues -> two centred lines, split at a natural break
-        lines = [line]
-        if len(line) > 14:
-            best = -1
-            for i, c in enumerate(line):
-                if c in "\uff0c\u3001\uff1b\uff1a" and \
-                        abs(i - len(line) / 2) < abs(best - len(line) / 2):
-                    best = i
-            if best > 0:
-                lines = [line[:best + 1].strip(), line[best + 1:].strip()]
-            else:
-                mid = len(line) // 2
-                lines = [line[:mid].strip(), line[mid:].strip()]
-        # shrink any line that still overflows 94% of the width
-        fs = sub_fs
-        longest = max(len(ln) for ln in lines)
-        fs = min(fs, int(w * 0.94 / max(longest, 1)))
-        for m, ln in enumerate(lines):
-            p = os.path.join(tempfile.gettempdir(),
-                             f"sub_{os.getpid()}_{n}_{m}.txt")
-            open(p, "w", encoding="utf-8").write(ln)
-            tmpfiles.append(p)
+
+    def add_textfile(txt):
+        p = os.path.join(tempfile.gettempdir(),
+                         f"cap_{os.getpid()}_{len(tmpfiles)}.txt")
+        open(p, "w", encoding="utf-8").write(txt)
+        tmpfiles.append(p)
+        return p
+
+    if caption_style == "box":
+        navy = "0x2B304B"
+        pad = int(14 * sc)
+        # bottom-anchored just above the tiny disclaimer zone
+        box_bottom = int(h * 0.965)
+        for n, (a, b, line) in enumerate(cues):
+            line = line.strip()
+            if not line:
+                continue
+            lines = _split_cue(line)
+            longest = max(len(ln) for ln in lines)
+            fs = min(int(38 * sc), int(w * 0.94 / max(longest, 1)))
+            lh = fs + int(8 * sc)
+            text_h = len(lines) * fs + (len(lines) - 1) * int(8 * sc)
+            y0 = box_bottom - pad - text_h
+            p = add_textfile("\n".join(lines))
             filters.append(
                 f"drawtext=fontfile={_BOLD_FONT_PATH}:textfile={p}:"
-                f"fontsize={fs}:fontcolor=white:"
-                f"borderw={max(3, fs // 13)}:bordercolor=black:"
-                f"shadowcolor=black@0.6:shadowx=2:shadowy=2:"
-                f"x=(w-text_w)/2:y={sub_y + m * (fs + 10)}:"
+                f"fontsize={fs}:fontcolor={navy}:"
+                f"box=1:boxcolor=white:boxborderw={pad}:"
+                f"x=(w-text_w)/2:y={y0}:"
                 f"enable='gte(t\\,{a:.2f})*lt(t\\,{b:.2f})'")
-    wm_vf, wm_tmp = _watermark_filters(text, w, h, _BOLD_FONT_PATH)
-    tmpfiles.extend(wm_tmp)
-    vf = ",".join(filters + [wm_vf])
+    else:
+        sub_fs = max(28, int(w * 0.064))
+        sub_y = int(h * 0.09) if sub_pos == "top" else h - int(h * 0.24)
+        for n, (a, b, line) in enumerate(cues):
+            line = line.strip()
+            if not line:
+                continue
+            lines = _split_cue(line)
+            longest = max(len(ln) for ln in lines)
+            fs = min(sub_fs, int(w * 0.94 / max(longest, 1)))
+            for m, ln in enumerate(lines):
+                p = add_textfile(ln)
+                filters.append(
+                    f"drawtext=fontfile={_BOLD_FONT_PATH}:textfile={p}:"
+                    f"fontsize={fs}:fontcolor=white:"
+                    f"borderw={max(3, fs // 13)}:bordercolor=black:"
+                    f"shadowcolor=black@0.6:shadowx=2:shadowy=2:"
+                    f"x=(w-text_w)/2:y={sub_y + m * (fs + int(10 * sc))}:"
+                    f"enable='gte(t\\,{a:.2f})*lt(t\\,{b:.2f})'")
+
+    if watermark_mode == "tiny":
+        # one super-small disclaimer line at the very bottom
+        fs = max(12, int(w * 0.022))
+        p = add_textfile(text)
+        filters.append(
+            f"drawtext=fontfile={_BOLD_FONT_PATH}:textfile={p}:fontsize={fs}:"
+            f"fontcolor=white:borderw=2:bordercolor=black@0.7:"
+            f"x=(w-text_w)/2:y=h-text_h-{int(8 * sc)}")
+    else:
+        wm_vf, wm_tmp = _watermark_filters(text, w, h, _BOLD_FONT_PATH)
+        tmpfiles.extend(wm_tmp)
+        filters.append(wm_vf)
+
+    vf = ",".join(filters)
     try:
         run(["ffmpeg", "-y", "-v", "error", "-i", src_path,
              "-vf", vf, "-c:a", "copy", dest_path], timeout=900)
