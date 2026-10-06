@@ -428,17 +428,74 @@ def clean_subtitle(text):
     )
 
 
-def burn_subtitles(src_path, srt_path, dest_path, text):
-    """Burn Cantonese subtitles + watermark in one ffmpeg pass. Raises."""
-    srt_esc = srt_path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "")
-    # MarginV=210: Cantonese subs sit ABOVE the two-line watermark block.
-    style = ("FontName=Noto Sans CJK HK,FontSize=20,PrimaryColour=&H00FFFFFF,"
-             "OutlineColour=&H80000000,BorderStyle=1,Outline=2,Shadow=0,"
-             "MarginV=210,Alignment=2")
+def _parse_srt(path):
+    """Minimal SRT parser -> [(start_sec, end_sec, text)]."""
+    def ts(t):
+        h, m, rest = t.split(":")
+        sec, ms = rest.split(",")
+        return int(h) * 3600 + int(m) * 60 + int(sec) + int(ms) / 1000.0
+    cues = []
+    for block in open(path, encoding="utf-8").read().strip().split("\n\n"):
+        lines = [ln for ln in block.split("\n") if ln.strip()]
+        if len(lines) >= 3 and "-->" in lines[1]:
+            a, b = [x.strip() for x in lines[1].split("-->")]
+            cues.append((ts(a), ts(b), " ".join(lines[2:])))
+    return cues
+
+
+def burn_subtitles(src_path, srt_path, dest_path, text, sub_pos="bottom"):
+    """Burn Cantonese subtitles + watermark in one ffmpeg pass. Raises.
+
+    Subtitles are drawtext cues (realufo.org showcase style): bold white CJK,
+    thick black outline + drop shadow, centred, timed with enable=between().
+    Pixel-exact positioning — no libass/ASS scaling surprises.
+    sub_pos: "top" (below the top edge, for sources with big burned-in
+    captions) or "bottom" (above the watermark block).
+    """
+    import tempfile
     w, h = _video_dims(src_path)
-    wm_vf, tmpfiles = _watermark_filters(text, w, h, _BOLD_FONT_PATH)
-    vf = (f"subtitles='{srt_esc}':fontsdir='/usr/share/fonts/opentype/noto':"
-          f"force_style='{style}',{wm_vf}")
+    cues = _parse_srt(srt_path)
+    sub_fs = max(28, int(w * 0.064))
+    sub_y = int(h * 0.09) if sub_pos == "top" else h - int(h * 0.24)
+    border = max(3, sub_fs // 13)
+    filters = []
+    tmpfiles = []
+    for n, (a, b, line) in enumerate(cues):
+        line = line.strip()
+        if not line:
+            continue
+        # long cues -> two centred lines, split at a natural break
+        lines = [line]
+        if len(line) > 14:
+            best = -1
+            for i, c in enumerate(line):
+                if c in "\uff0c\u3001\uff1b\uff1a" and \
+                        abs(i - len(line) / 2) < abs(best - len(line) / 2):
+                    best = i
+            if best > 0:
+                lines = [line[:best + 1].strip(), line[best + 1:].strip()]
+            else:
+                mid = len(line) // 2
+                lines = [line[:mid].strip(), line[mid:].strip()]
+        # shrink any line that still overflows 94% of the width
+        fs = sub_fs
+        longest = max(len(ln) for ln in lines)
+        fs = min(fs, int(w * 0.94 / max(longest, 1)))
+        for m, ln in enumerate(lines):
+            p = os.path.join(tempfile.gettempdir(),
+                             f"sub_{os.getpid()}_{n}_{m}.txt")
+            open(p, "w", encoding="utf-8").write(ln)
+            tmpfiles.append(p)
+            filters.append(
+                f"drawtext=fontfile={_BOLD_FONT_PATH}:textfile={p}:"
+                f"fontsize={fs}:fontcolor=white:"
+                f"borderw={max(3, fs // 13)}:bordercolor=black:"
+                f"shadowcolor=black@0.6:shadowx=2:shadowy=2:"
+                f"x=(w-text_w)/2:y={sub_y + m * (fs + 10)}:"
+                f"enable='gte(t\\,{a:.2f})*lt(t\\,{b:.2f})'")
+    wm_vf, wm_tmp = _watermark_filters(text, w, h, _BOLD_FONT_PATH)
+    tmpfiles.extend(wm_tmp)
+    vf = ",".join(filters + [wm_vf])
     try:
         run(["ffmpeg", "-y", "-v", "error", "-i", src_path,
              "-vf", vf, "-c:a", "copy", dest_path], timeout=900)
