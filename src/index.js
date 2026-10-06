@@ -176,6 +176,31 @@ function buildTranslationPrompt(caption, imageTexts, segments, source) {
     "\n\nYOUR JSON RESPONSE:";
 }
 
+// Segments-only prompt for batches after the first (the first batch uses the
+// full prompt with caption + SEO). Keeps each Workers AI call small enough to
+// avoid 3046 timeouts on dense videos.
+function buildSegmentsPrompt(segments) {
+  const input = segments.map((s) => ({ i: s.i, text_en: s.text_en || "" }));
+  return [
+    "You are a professional translator writing for a Hong Kong audience.",
+    "Translate each English segment below into Traditional Chinese, Hong Kong written style (書面語，繁體中文).",
+    "STRICT RULES:",
+    "- Translate ONLY. Do not add commentary, explanations, or content not in the source.",
+    "- These become burned-in video subtitles: keep each one short " +
+      "(one line, under 20 Chinese characters when possible), Cantonese-flavoured " +
+      "where natural (嘅, 咁, 係, 唔), faithful to the spoken meaning.",
+    "- If a segment is empty, return an empty string for it.",
+    "",
+    "INPUT (JSON):",
+    JSON.stringify(input),
+    "",
+    "Return ONLY a JSON object with EXACTLY this key — no markdown fences, no commentary:",
+    '{"segments_zh": [{"i": 0, "text_zh": "..."}]}',
+    "",
+    "YOUR JSON RESPONSE:",
+  ].join("\n");
+}
+
 // English-target prompt: no translation — just an SEO hook + hashtags for
 // the English-speaking audience account (original clips, watermarked).
 function buildEnglishSeoPrompt(caption, imageTexts, source) {
@@ -246,7 +271,6 @@ async function handleTranslate(request, env) {
     })
   );
 
-  const prompt = buildTranslationPrompt(caption, slots.map((s) => s.text_en), inSegs, source);
   const mainTag = SOURCE_MAIN_TAG[source] || "#翻譯";
 
   // English target: no translation — original clips for English speakers.
@@ -283,32 +307,48 @@ async function handleTranslate(request, env) {
   let segmentsZh = [];
   let seoHook = "";
   let seoTags = [];
+  // Batch dense segment lists: a single Workers AI call over many long
+  // segments times out (3046). First batch carries caption/images/SEO;
+  // later batches are segments-only. Partial results survive per batch.
+  const SEG_BATCH = 6;
+  const segBatches = [];
+  for (let i = 0; i < inSegs.length; i += SEG_BATCH) segBatches.push(inSegs.slice(i, i + SEG_BATCH));
+  if (segBatches.length === 0) segBatches.push([]);
+  const segByI = new Map();
   try {
-    const out = await env.AI.run(TEXT_MODEL, {
-      prompt,
-      max_tokens: 8192, // 2026-10-05: 4096 truncated long segment lists mid-JSON
-    });
-    const raw = String(out?.response ?? "");
-    try {
-      const parsed = extractJson(raw);
-      captionZh = typeof parsed.caption_zh === "string" ? parsed.caption_zh : "";
-      const zhList = Array.isArray(parsed.image_texts_zh) ? parsed.image_texts_zh : [];
-      slots.forEach((s, i) => {
-        s.text_zh = typeof zhList[i] === "string" ? zhList[i] : "";
+    for (let b = 0; b < segBatches.length; b++) {
+      const batchPrompt = b === 0
+        ? buildTranslationPrompt(caption, slots.map((s) => s.text_en), segBatches[0], source)
+        : buildSegmentsPrompt(segBatches[b]);
+      const out = await env.AI.run(TEXT_MODEL, {
+        prompt: batchPrompt,
+        max_tokens: 8192, // 2026-10-05: 4096 truncated long segment lists mid-JSON
       });
-      const segList = Array.isArray(parsed.segments_zh) ? parsed.segments_zh : [];
-      const segByI = new Map(segList.filter((s) => s && typeof s.i === "number")
-        .map((s) => [s.i, typeof s.text_zh === "string" ? s.text_zh : ""]));
-      segmentsZh = inSegs.map((s) => ({ i: s.i, text_zh: segByI.get(s.i) ?? "" }));
-      seoHook = typeof parsed.seo_hook === "string" ? parsed.seo_hook : "";
-      const tagList = Array.isArray(parsed.seo_hashtags) ? parsed.seo_hashtags : [];
-      seoTags = tagList.filter((t) => typeof t === "string" && t.startsWith("#")).slice(0, 10);
-      if (seoTags.length && !seoTags.includes(mainTag)) seoTags.unshift(mainTag);
-    } catch {
-      // Best-effort fallback: surface raw model output for the human reviewer.
-      warnings.push("translation output was not valid JSON; returning raw model text for review");
-      captionZh = raw.trim();
+      const raw = String(out?.response ?? "");
+      try {
+        const parsed = extractJson(raw);
+        if (b === 0) {
+          captionZh = typeof parsed.caption_zh === "string" ? parsed.caption_zh : "";
+          const zhList = Array.isArray(parsed.image_texts_zh) ? parsed.image_texts_zh : [];
+          slots.forEach((s, i) => {
+            s.text_zh = typeof zhList[i] === "string" ? zhList[i] : "";
+          });
+          seoHook = typeof parsed.seo_hook === "string" ? parsed.seo_hook : "";
+          const tagList = Array.isArray(parsed.seo_hashtags) ? parsed.seo_hashtags : [];
+          seoTags = tagList.filter((t) => typeof t === "string" && t.startsWith("#")).slice(0, 10);
+          if (seoTags.length && !seoTags.includes(mainTag)) seoTags.unshift(mainTag);
+        }
+        const segList = Array.isArray(parsed.segments_zh) ? parsed.segments_zh : [];
+        for (const s of segList) {
+          if (s && typeof s.i === "number" && typeof s.text_zh === "string") segByI.set(s.i, s.text_zh);
+        }
+      } catch {
+        // Best-effort fallback: surface raw model output for the human reviewer.
+        warnings.push(`batch ${b + 1}/${segBatches.length}: translation output was not valid JSON; returning raw model text for review`);
+        if (b === 0) captionZh = raw.trim();
+      }
     }
+    segmentsZh = inSegs.map((s) => ({ i: s.i, text_zh: segByI.get(s.i) ?? "" }));
   } catch (e) {
     warnings.push(`translation failed: ${String(e?.message || e).slice(0, 200)}`);
   }
