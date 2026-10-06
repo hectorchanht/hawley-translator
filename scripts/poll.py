@@ -254,6 +254,75 @@ def download(url, dest_path):
 # The actual text is per-source (SOURCES[...]["watermark_text"]) and passed in.
 WATERMARK_FONT_TTC = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 WATERMARK_FONT_INDEX = 4  # Noto Sans CJK HK inside the .ttc
+# Bold HK face extracted to a single-face .otf: ffmpeg drawtext has no ttc
+# fontindex option, so fontconfig "style=Bold" resolution is unreliable for
+# CJK. Stored under state_dir/fonts/ (set in main()).
+_BOLD_FONT_PATH = os.path.expanduser(
+    "~/workspace/goals/hawley-ig-auto-translate-bot/hidden_files/fonts/NotoSansCJKHK-Bold.otf")
+
+
+def _ensure_bold_font(path):
+    """Extract the Noto Sans CJK HK Bold face to a single-face .otf.
+
+    ffmpeg drawtext has no ttc fontindex option, so a standalone face file
+    is needed. Extracted once from the system NotoSansCJK-Bold.ttc; later
+    runs reuse it. Raises RuntimeError with a clear message on failure."""
+    if os.path.exists(path):
+        return
+    src = "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
+    if not os.path.exists(src):
+        raise RuntimeError(f"no system CJK Bold font for watermark: {src} missing")
+    try:
+        from fontTools.ttLib import TTCollection
+        import subprocess
+        idx = int(subprocess.run(
+            ["fc-match", "-v", "Noto Sans CJK HK:style=Bold"],
+            capture_output=True, text=True).stdout
+            .split("index:")[1].split("(")[0].strip())
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        TTCollection(src).fonts[idx].save(path)
+    except Exception as e:
+        raise RuntimeError(f"could not extract CJK Bold face from {src}: {e}")
+    if not os.path.exists(path):
+        raise RuntimeError(f"bold CJK font extraction failed: {path}")
+
+
+def _video_dims(path):
+    out = run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+               "-show_entries", "stream=width,height", "-of", "csv=p=0", path])
+    w, h = out.strip().split(",")
+    return int(w), int(h)
+
+
+def _watermark_filters(text, w, h, font_path):
+    """drawtext filter chain for the watermark, realufo.org stamp() style:
+    bold face, white text, thick black outline + drop shadow, centred, no
+    box — readable on any background. Splits "LEAD · @handle" into two
+    lines so each stays big enough to read on a phone screen."""
+    import tempfile
+    lead, _, handle = text.partition("·")
+    lead, handle = lead.strip(), handle.strip()
+    lines = [lead] + ([handle] if handle else [])
+    base_fs = [int(w * 0.075), int(w * 0.047)]  # ~54px / ~34px on 720-wide
+    y_off = [140, 60]  # px above the bottom edge, at 1280 height
+    filters = []
+    tmpfiles = []
+    for i, line in enumerate(lines):
+        fs = base_fs[i] if i < len(base_fs) else base_fs[-1]
+        # shrink long lines to fit 90% of the width (CJK ~1em, Latin ~0.62em)
+        avg = 1.0 if any(ord(c) > 0x2E7F for c in line) else 0.62
+        fs = min(fs, int(w * 0.9 / (avg * max(len(line), 1))))
+        border = max(3, fs // 13)
+        yo = int(y_off[i] * h / 1280)
+        p = os.path.join(tempfile.gettempdir(), f"wm_{os.getpid()}_{i}.txt")
+        open(p, "w", encoding="utf-8").write(line)
+        tmpfiles.append(p)
+        filters.append(
+            f"drawtext=fontfile={font_path}:textfile={p}:fontsize={fs}:"
+            f"fontcolor=white:borderw={border}:bordercolor=black:"
+            f"shadowcolor=black@0.6:shadowx=2:shadowy=2:"
+            f"x=(w-text_w)/2:y=h-text_h-{yo}")
+    return ",".join(filters), tmpfiles
 
 
 def _cjk_font(size):
@@ -294,13 +363,17 @@ def download_video(post_url, dest_path):
 
 def watermark_video(src_path, dest_path, text):
     """Burn the watermark into the video with ffmpeg drawtext. Raises."""
-    safe = text.replace("\\", "\\\\").replace(":", "\\:").replace("'", "")
-    # fontsize scales with the SMALLER dimension so vertical reels don't clip
-    vf = (f"drawtext=fontfile={WATERMARK_FONT_TTC}:text='{safe}':"
-          f"fontsize=min(w\\,h)/26:x=(w-text_w)/2:y=h-text_h-20:"
-          f"fontcolor=white:box=1:boxcolor=black@0.55:boxborderw=12")
-    run(["ffmpeg", "-y", "-v", "error", "-i", src_path,
-         "-vf", vf, "-c:a", "copy", dest_path], timeout=600)
+    w, h = _video_dims(src_path)
+    vf, tmpfiles = _watermark_filters(text, w, h, _BOLD_FONT_PATH)
+    try:
+        run(["ffmpeg", "-y", "-v", "error", "-i", src_path,
+             "-vf", vf, "-c:a", "copy", dest_path], timeout=600)
+    finally:
+        for p_ in tmpfiles:
+            try:
+                os.unlink(p_)
+            except OSError:
+                pass
 
 
 # Speech transcription for Cantonese subtitles (faster-whisper, local model
@@ -357,18 +430,24 @@ def clean_subtitle(text):
 
 def burn_subtitles(src_path, srt_path, dest_path, text):
     """Burn Cantonese subtitles + watermark in one ffmpeg pass. Raises."""
-    safe = text.replace("\\", "\\\\").replace(":", "\\:").replace("'", "")
     srt_esc = srt_path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "")
+    # MarginV=210: Cantonese subs sit ABOVE the two-line watermark block.
     style = ("FontName=Noto Sans CJK HK,FontSize=20,PrimaryColour=&H00FFFFFF,"
              "OutlineColour=&H80000000,BorderStyle=1,Outline=2,Shadow=0,"
-             "MarginV=80,Alignment=2")
+             "MarginV=210,Alignment=2")
+    w, h = _video_dims(src_path)
+    wm_vf, tmpfiles = _watermark_filters(text, w, h, _BOLD_FONT_PATH)
     vf = (f"subtitles='{srt_esc}':fontsdir='/usr/share/fonts/opentype/noto':"
-          f"force_style='{style}',"
-          f"drawtext=fontfile={WATERMARK_FONT_TTC}:text='{safe}':fontsize=min(w\\,h)/26:"
-          f"x=(w-text_w)/2:y=h-text_h-20:fontcolor=white:box=1:"
-          f"boxcolor=black@0.55:boxborderw=12")
-    run(["ffmpeg", "-y", "-v", "error", "-i", src_path,
-         "-vf", vf, "-c:a", "copy", dest_path], timeout=900)
+          f"force_style='{style}',{wm_vf}")
+    try:
+        run(["ffmpeg", "-y", "-v", "error", "-i", src_path,
+             "-vf", vf, "-c:a", "copy", dest_path], timeout=900)
+    finally:
+        for p_ in tmpfiles:
+            try:
+                os.unlink(p_)
+            except OSError:
+                pass
 
 
 def translate(worker_url, source, caption, image_texts, image_urls=(),
@@ -449,6 +528,10 @@ def main():
     username = args.username or src["username"]
     watermark_text = src["watermark_text_en" if args.target == "en" else "watermark_text"]
 
+    global _BOLD_FONT_PATH
+    _BOLD_FONT_PATH = os.path.join(
+        args.state_dir, "fonts", "NotoSansCJKHK-Bold.otf")
+    _ensure_bold_font(_BOLD_FONT_PATH)
     os.makedirs(args.state_dir, exist_ok=True)
     os.makedirs(os.path.join(args.state_dir, "images"), exist_ok=True)
     # Backwards compatible: hawley/zh keeps the original state filenames (the
