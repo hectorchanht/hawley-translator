@@ -133,13 +133,12 @@ async function ocrImage(env, url) {
   }
 }
 
-function buildTranslationPrompt(caption, imageTexts, segments, source) {
+// Caption/images/SEO prompt — no segments. Segments are always translated
+// in separate small batches (below) so no single Workers AI call gets big
+// enough to hit the 3046 timeout.
+function buildCaptionPrompt(caption, imageTexts, source) {
   const nameRule = SOURCE_NAME_RULES[source] || "";
   const mainTag = SOURCE_MAIN_TAG[source] || "#翻譯";
-  // NOTE 2026-10-05: the old prompt listed segments as "SPEECH N:" blocks and
-  // the model pattern-completed them (emitting "SPEECH 17: <english>" instead
-  // of JSON, in English instead of Chinese). Input is now JSON and the
-  // response-format instruction sits at the very END, right before output.
   const rules = [
     "You are a professional translator writing for a Hong Kong audience.",
     "Translate the English content in INPUT below into Traditional Chinese, Hong Kong written style (書面語，繁體中文).",
@@ -148,10 +147,6 @@ function buildTranslationPrompt(caption, imageTexts, segments, source) {
     "- Keep @mentions (e.g. @senatorhawley) and #hashtags unchanged.",
     "- Preserve line breaks and paragraph structure.",
     "- Be faithful and concise.",
-    "- If a segment is empty, return an empty string for it.",
-    "- \"segments\" become burned-in video subtitles: keep each one short " +
-      "(one line, under 20 Chinese characters when possible), Cantonese-flavoured " +
-      "where natural (嘅, 咁, 係, 唔), faithful to the spoken meaning.",
     "- Also produce:",
     '  - "seo_hook": one punchy Instagram opening line (under 50 Chinese characters, ' +
       "Cantonese-flavoured, may start with ONE emoji), capturing the most newsworthy point " +
@@ -164,14 +159,12 @@ function buildTranslationPrompt(caption, imageTexts, segments, source) {
   const input = {
     caption: caption || "",
     image_texts: imageTexts.map((t) => t || ""),
-    segments: segments.map((s) => ({ i: s.i, text_en: s.text_en || "" })),
   };
   return rules.join("\n") +
     "\n\nINPUT (JSON):\n" + JSON.stringify(input) +
     '\n\nReturn ONLY a JSON object with EXACTLY these keys — no markdown fences, ' +
     "no commentary before or after:\n" +
     '{"caption_zh": "...", "image_texts_zh": ["...", "..."], ' +
-    '"segments_zh": [{"i": 0, "text_zh": "..."}], ' +
     '"seo_hook": "...", "seo_hashtags": ["#..."]}' +
     "\n\nYOUR JSON RESPONSE:";
 }
@@ -307,52 +300,48 @@ async function handleTranslate(request, env) {
   let segmentsZh = [];
   let seoHook = "";
   let seoTags = [];
-  // Batch dense segment lists: a single Workers AI call over too much text
-  // times out (3046). First batch carries caption/images/SEO; later batches
-  // are segments-only. Batched by character count, not segment count —
-  // long segments time out even in small counts. Partial results survive.
-  const SEG_BATCH_CHARS = 400;
-  const segBatches = [];
-  let cur = [], curLen = 0;
-  for (const s of inSegs) {
-    const l = (s.text_en || "").length;
-    if (cur.length && curLen + l > SEG_BATCH_CHARS) { segBatches.push(cur); cur = []; curLen = 0; }
-    cur.push(s); curLen += l;
-  }
-  if (cur.length) segBatches.push(cur);
-  if (segBatches.length === 0) segBatches.push([]);
+  // Two-phase translation: (1) caption/images/SEO in one small call;
+  // (2) segments in tiny char-batched calls. A single Workers AI call over
+  // too much text times out (3046), so nothing here is allowed to get big.
+  // Partial results survive per call.
   const segByI = new Map();
   try {
-    for (let b = 0; b < segBatches.length; b++) {
-      const batchPrompt = b === 0
-        ? buildTranslationPrompt(caption, slots.map((s) => s.text_en), segBatches[0], source)
-        : buildSegmentsPrompt(segBatches[b]);
+    // Phase 1: caption + images + SEO (no segments).
+    {
       const out = await env.AI.run(TEXT_MODEL, {
-        prompt: batchPrompt,
-        max_tokens: 8192, // 2026-10-05: 4096 truncated long segment lists mid-JSON
+        prompt: buildCaptionPrompt(caption, slots.map((s) => s.text_en), source),
+        max_tokens: 2048,
       });
-      const raw = String(out?.response ?? "");
-      try {
-        const parsed = extractJson(raw);
-        if (b === 0) {
-          captionZh = typeof parsed.caption_zh === "string" ? parsed.caption_zh : "";
-          const zhList = Array.isArray(parsed.image_texts_zh) ? parsed.image_texts_zh : [];
-          slots.forEach((s, i) => {
-            s.text_zh = typeof zhList[i] === "string" ? zhList[i] : "";
-          });
-          seoHook = typeof parsed.seo_hook === "string" ? parsed.seo_hook : "";
-          const tagList = Array.isArray(parsed.seo_hashtags) ? parsed.seo_hashtags : [];
-          seoTags = tagList.filter((t) => typeof t === "string" && t.startsWith("#")).slice(0, 10);
-          if (seoTags.length && !seoTags.includes(mainTag)) seoTags.unshift(mainTag);
-        }
-        const segList = Array.isArray(parsed.segments_zh) ? parsed.segments_zh : [];
-        for (const s of segList) {
-          if (s && typeof s.i === "number" && typeof s.text_zh === "string") segByI.set(s.i, s.text_zh);
-        }
-      } catch {
-        // Best-effort fallback: surface raw model output for the human reviewer.
-        warnings.push(`batch ${b + 1}/${segBatches.length}: translation output was not valid JSON; returning raw model text for review`);
-        if (b === 0) captionZh = raw.trim();
+      const parsed = extractJson(String(out?.response ?? ""));
+      captionZh = typeof parsed.caption_zh === "string" ? parsed.caption_zh : "";
+      const zhList = Array.isArray(parsed.image_texts_zh) ? parsed.image_texts_zh : [];
+      slots.forEach((s, i) => {
+        s.text_zh = typeof zhList[i] === "string" ? zhList[i] : "";
+      });
+      seoHook = typeof parsed.seo_hook === "string" ? parsed.seo_hook : "";
+      const tagList = Array.isArray(parsed.seo_hashtags) ? parsed.seo_hashtags : [];
+      seoTags = tagList.filter((t) => typeof t === "string" && t.startsWith("#")).slice(0, 10);
+      if (seoTags.length && !seoTags.includes(mainTag)) seoTags.unshift(mainTag);
+    }
+    // Phase 2: segments in small batches.
+    const SEG_BATCH_CHARS = 200;
+    const segBatches = [];
+    let cur = [], curLen = 0;
+    for (const s of inSegs) {
+      const l = (s.text_en || "").length;
+      if (cur.length && curLen + l > SEG_BATCH_CHARS) { segBatches.push(cur); cur = []; curLen = 0; }
+      cur.push(s); curLen += l;
+    }
+    if (cur.length) segBatches.push(cur);
+    for (let b = 0; b < segBatches.length; b++) {
+      const out = await env.AI.run(TEXT_MODEL, {
+        prompt: buildSegmentsPrompt(segBatches[b]),
+        max_tokens: 2048,
+      });
+      const parsed = extractJson(String(out?.response ?? ""));
+      const segList = Array.isArray(parsed.segments_zh) ? parsed.segments_zh : [];
+      for (const s of segList) {
+        if (s && typeof s.i === "number" && typeof s.text_zh === "string") segByI.set(s.i, s.text_zh);
       }
     }
     segmentsZh = inSegs.map((s) => ({ i: s.i, text_zh: segByI.get(s.i) ?? "" }));
