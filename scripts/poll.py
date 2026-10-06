@@ -43,7 +43,7 @@ State lives under STATE_DIR (default: the goal's hidden_files dir):
 Requires: instagram-cli (linked account, read-only use), yt-dlp (video
 downloads + reel poster fallback), ffmpeg (video watermark), Pillow (image
 watermark), and a CJK font (Noto Sans CJK). Env:
-HAWLEY_TRANSLATOR_URL=https://<worker>.workers.dev
+HAWLEY_TRANSLATOR_URL=https://hawley-translator-hk.gowithin.workers.dev
 """
 
 import argparse
@@ -626,7 +626,8 @@ def main():
                     help="override the source's IG username")
     ap.add_argument("--limit", type=int, default=20)
     ap.add_argument("--state-dir", default=DEFAULT_STATE_DIR)
-    ap.add_argument("--worker-url", default=os.environ.get("HAWLEY_TRANSLATOR_URL", ""))
+    ap.add_argument("--worker-url", default=os.environ.get("HAWLEY_TRANSLATOR_URL",
+        "https://hawley-translator-hk.gowithin.workers.dev"))
     ap.add_argument("--dry-run", action="store_true", help="list new posts without translating")
     args = ap.parse_args()
 
