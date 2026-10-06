@@ -366,6 +366,191 @@ async function handleTranslate(request, env) {
   });
 }
 
+const SITE_HTML = `<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>霍利翻譯員 · Hawley Translator — 美國政壇,講返廣東話</title>
+<meta name="description" content="美國參議員霍利同特朗普嘅 IG posts,每日繁體中文翻譯,加廣東話字幕。非官方翻譯計劃。">
+<style>
+:root{
+  --bg:#0b1020; --bg2:#111832; --card:#151d3d; --line:#26305e;
+  --text:#eef1ff; --muted:#9aa3c7; --accent:#f5b301; --accent2:#e63946;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif;line-height:1.7;-webkit-font-smoothing:antialiased}
+a{color:inherit}
+.wrap{max-width:960px;margin:0 auto;padding:0 20px}
+header{position:sticky;top:0;z-index:10;background:rgba(11,16,32,.9);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+header .wrap{display:flex;align-items:center;justify-content:space-between;height:60px}
+.logo{font-weight:800;font-size:18px;letter-spacing:.5px}
+.logo span{color:var(--accent)}
+nav{display:flex;gap:18px;font-size:14px}
+nav a{text-decoration:none;color:var(--muted)}
+nav a:hover{color:var(--text)}
+@media(max-width:640px){nav a:nth-child(3){display:none}}
+.hero{padding:72px 0 56px;text-align:center}
+.badge{display:inline-block;font-size:12px;letter-spacing:2px;color:var(--accent);border:1px solid var(--accent);border-radius:999px;padding:4px 14px;margin-bottom:20px}
+.hero h1{font-size:clamp(32px,6vw,54px);line-height:1.3;font-weight:800;margin-bottom:16px}
+.hero h1 em{font-style:normal;color:var(--accent)}
+.hero p{color:var(--muted);max-width:640px;margin:0 auto 28px;font-size:16px}
+.cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+.btn{display:inline-block;padding:12px 26px;border-radius:10px;font-weight:700;font-size:15px;text-decoration:none;cursor:pointer;border:0}
+.btn-gold{background:var(--accent);color:#1a1405}
+.btn-ghost{background:transparent;color:var(--text);border:1px solid var(--line)}
+.btn-ghost:hover{border-color:var(--muted)}
+section{padding:48px 0}
+h2{font-size:24px;font-weight:800;margin-bottom:8px}
+.sec-sub{color:var(--muted);font-size:14px;margin-bottom:24px}
+.demo{background:var(--bg2);border:1px solid var(--line);border-radius:16px;padding:24px}
+.demo label{font-size:13px;color:var(--muted);display:block;margin-bottom:6px}
+.demo select{background:var(--card);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px 12px;font-size:14px;margin-bottom:14px}
+.demo textarea{width:100%;min-height:110px;background:var(--card);color:var(--text);border:1px solid var(--line);border-radius:10px;padding:12px;font-size:15px;font-family:inherit;resize:vertical}
+.demo textarea:focus{outline:none;border-color:var(--accent)}
+.demo .row{display:flex;gap:10px;align-items:center;margin:14px 0;flex-wrap:wrap}
+#out{display:none;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-top:6px}
+#out.show{display:block}
+#out .zh{font-size:16px;margin-bottom:12px;white-space:pre-wrap}
+#out .tags{font-size:13px;color:var(--accent)}
+#out .warn{font-size:12px;color:var(--accent2);margin-top:8px}
+.loading{color:var(--muted);font-size:14px}
+.note{font-size:12px;color:var(--muted);margin-top:12px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px;text-decoration:none;display:block;transition:transform .15s,border-color .15s}
+.card:hover{transform:translateY(-2px);border-color:var(--accent)}
+.card .handle{font-weight:800;font-size:16px;margin-bottom:6px;color:var(--accent)}
+.card .desc{font-size:13px;color:var(--muted)}
+.steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px}
+.step{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px}
+.step .n{display:inline-flex;width:32px;height:32px;border-radius:50%;background:var(--accent);color:#1a1405;font-weight:800;align-items:center;justify-content:center;margin-bottom:10px}
+.step h3{font-size:15px;margin-bottom:6px}
+.step p{font-size:13px;color:var(--muted)}
+.disclaimer{border:1px dashed var(--line);border-radius:12px;padding:18px 20px;font-size:13px;color:var(--muted);text-align:center}
+footer{border-top:1px solid var(--line);padding:24px 0;color:var(--muted);font-size:12px;text-align:center}
+footer a{color:var(--muted)}
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <div class="logo">霍譯<span> · </span>Hawley Translator</div>
+    <nav>
+      <a href="#demo">即時翻譯</a>
+      <a href="#accounts">帳號</a>
+      <a href="#how">點運作</a>
+    </nav>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="hero">
+    <div class="badge">非官方翻譯計劃 · UNOFFICIAL</div>
+    <h1>美國政壇,<em>講返廣東話。</em></h1>
+    <p>每日監察美國參議員 Josh Hawley 同 Donald Trump 嘅 Instagram,翻譯成香港人睇得明嘅繁體中文,重要片段加埋廣東話字幕。真人覆核,先至出街。</p>
+    <div class="cta">
+      <a class="btn btn-gold" href="#demo">即刻試下翻譯</a>
+      <a class="btn btn-ghost" href="#accounts">睇 IG 帳號</a>
+    </div>
+  </div>
+
+  <section id="demo">
+    <h2>即時翻譯試玩</h2>
+    <p class="sec-sub">貼一段英文 caption 入嚟,同我哋部機用同一套 AI 即時譯做繁體中文。</p>
+    <div class="demo">
+      <label for="src">邊個講嘅?</label>
+      <select id="src">
+        <option value="hawley">Josh Hawley 霍利參議員</option>
+        <option value="trump">Donald Trump 特朗普</option>
+      </select>
+      <label for="cap">英文原文</label>
+      <textarea id="cap" placeholder="Paste an English caption here…&#10;例如: Big Tech has too much power. It's time to break them up."></textarea>
+      <div class="row">
+        <button class="btn btn-gold" id="go" type="button">翻譯成繁體中文</button>
+      </div>
+      <div id="out"></div>
+      <p class="note">由 Cloudflare Workers AI 即時翻譯 · 同正式 pipeline 同一粒 model · 機器翻譯僅供參考</p>
+    </div>
+  </section>
+
+  <section id="accounts">
+    <h2>追蹤我哋</h2>
+    <p class="sec-sub">三個帳號,三種口味。</p>
+    <div class="cards">
+      <a class="card" href="https://www.instagram.com/snhawleytranslatorhkunofficial" target="_blank" rel="noopener">
+        <div class="handle">@snhawleytranslatorhkunofficial</div>
+        <div class="desc">霍利參議員 · 繁體中文翻譯<br>Sen. Josh Hawley, in Traditional Chinese</div>
+      </a>
+      <a class="card" href="https://www.instagram.com/trumptranslatorhkunofficial" target="_blank" rel="noopener">
+        <div class="handle">@trumptranslatorhkunofficial</div>
+        <div class="desc">特朗普 · 繁體中文翻譯<br>Donald Trump, in Traditional Chinese</div>
+      </a>
+      <a class="card" href="https://www.instagram.com/globalnewsshorts" target="_blank" rel="noopener">
+        <div class="handle">@globalnewsshorts</div>
+        <div class="desc">環球新聞 shorts · 英文原片直出<br>USA &amp; world, in shorts</div>
+      </a>
+    </div>
+  </section>
+
+  <section id="how">
+    <h2>點樣運作</h2>
+    <p class="sec-sub">全自動流水線,最後一關係人。</p>
+    <div class="steps">
+      <div class="step"><div class="n">1</div><h3>監察</h3><p>每 4 小時掃一次目標 IG 帳號,有新 post 即刻發現。</p></div>
+      <div class="step"><div class="n">2</div><h3>讀圖</h3><p>OCR 抽出圖片入面嘅文字,影片就轉做廣東話字幕。</p></div>
+      <div class="step"><div class="n">3</div><h3>翻譯</h3><p>Workers AI 譯成香港人寫法嘅繁體中文,人名有固定譯法。</p></div>
+      <div class="step"><div class="n">4</div><h3>覆核</h3><p>真人睇過、改過,先至出 post。唔會自動亂出街。</p></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="disclaimer">
+      非官方 fans 項目,同 Josh Hawley 參議員、Donald Trump 本人及其團隊無關。<br>
+      Unofficial fan translation project. Not affiliated with or endorsed by any officeholder.
+    </div>
+  </section>
+</div>
+
+<footer>
+  <div class="wrap">
+    © 2026 Hawley Translator · Built on Cloudflare Workers + Workers AI<br>
+    <a href="/health">API status</a>
+  </div>
+</footer>
+
+<script>
+(function(){
+  var go = document.getElementById('go');
+  var out = document.getElementById('out');
+  go.addEventListener('click', function(){
+    var caption = document.getElementById('cap').value.trim();
+    var source = document.getElementById('src').value;
+    if(!caption){ out.className='show'; out.innerHTML='<div class="loading">請貼一段英文入嚟先。</div>'; return; }
+    out.className='show';
+    out.innerHTML='<div class="loading">翻譯緊…</div>';
+    go.disabled = true;
+    fetch('/translate', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ caption: caption, source: source, target: 'zh-Hant' })
+    }).then(function(r){ return r.json(); }).then(function(d){
+      var html = '<div class="zh"></div><div class="tags"></div><div class="warn"></div>';
+      out.innerHTML = html;
+      out.querySelector('.zh').textContent = d.caption_zh || '(翻譯唔到,試過另一段)';
+      out.querySelector('.tags').textContent = (d.seo_hashtags||[]).join(' ');
+      if(d.warnings && d.warnings.length){ out.querySelector('.warn').textContent = '注意: ' + d.warnings.join('; '); }
+      go.disabled = false;
+    }).catch(function(){
+      out.innerHTML='<div class="loading">出錯,稍後再試。</div>';
+      go.disabled = false;
+    });
+  });
+})();
+</script>
+</body>
+</html>
+`;
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -374,9 +559,8 @@ export default {
       return Response.json({ ok: true, time: new Date().toISOString() });
     }
     if (request.method === "GET" && url.pathname === "/") {
-      return Response.json({
-        name: "hawley-translator",
-        usage: "POST /translate with { caption, image_texts: [{url, text_en}], image_urls? }",
+      return new Response(SITE_HTML, {
+        headers: { "Content-Type": "text/html; charset=utf-8" },
       });
     }
     if (request.method === "POST" && url.pathname === "/translate") {
