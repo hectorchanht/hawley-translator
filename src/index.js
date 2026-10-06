@@ -307,12 +307,19 @@ async function handleTranslate(request, env) {
   let segmentsZh = [];
   let seoHook = "";
   let seoTags = [];
-  // Batch dense segment lists: a single Workers AI call over many long
-  // segments times out (3046). First batch carries caption/images/SEO;
-  // later batches are segments-only. Partial results survive per batch.
-  const SEG_BATCH = 6;
+  // Batch dense segment lists: a single Workers AI call over too much text
+  // times out (3046). First batch carries caption/images/SEO; later batches
+  // are segments-only. Batched by character count, not segment count —
+  // long segments time out even in small counts. Partial results survive.
+  const SEG_BATCH_CHARS = 400;
   const segBatches = [];
-  for (let i = 0; i < inSegs.length; i += SEG_BATCH) segBatches.push(inSegs.slice(i, i + SEG_BATCH));
+  let cur = [], curLen = 0;
+  for (const s of inSegs) {
+    const l = (s.text_en || "").length;
+    if (cur.length && curLen + l > SEG_BATCH_CHARS) { segBatches.push(cur); cur = []; curLen = 0; }
+    cur.push(s); curLen += l;
+  }
+  if (cur.length) segBatches.push(cur);
   if (segBatches.length === 0) segBatches.push([]);
   const segByI = new Map();
   try {
