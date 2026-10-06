@@ -305,25 +305,28 @@ async function handleTranslate(request, env) {
   // too much text times out (3046), so nothing here is allowed to get big.
   // Partial results survive per call.
   const segByI = new Map();
+  // Phase 1: caption + images + SEO (no segments).
   try {
-    // Phase 1: caption + images + SEO (no segments).
-    {
-      const out = await env.AI.run(TEXT_MODEL, {
-        prompt: buildCaptionPrompt(caption, slots.map((s) => s.text_en), source),
-        max_tokens: 2048,
-      });
-      const parsed = extractJson(String(out?.response ?? ""));
-      captionZh = typeof parsed.caption_zh === "string" ? parsed.caption_zh : "";
-      const zhList = Array.isArray(parsed.image_texts_zh) ? parsed.image_texts_zh : [];
-      slots.forEach((s, i) => {
-        s.text_zh = typeof zhList[i] === "string" ? zhList[i] : "";
-      });
-      seoHook = typeof parsed.seo_hook === "string" ? parsed.seo_hook : "";
-      const tagList = Array.isArray(parsed.seo_hashtags) ? parsed.seo_hashtags : [];
-      seoTags = tagList.filter((t) => typeof t === "string" && t.startsWith("#")).slice(0, 10);
-      if (seoTags.length && !seoTags.includes(mainTag)) seoTags.unshift(mainTag);
-    }
-    // Phase 2: segments in small batches.
+    const out = await env.AI.run(TEXT_MODEL, {
+      prompt: buildCaptionPrompt(caption, slots.map((s) => s.text_en), source),
+      max_tokens: 2048,
+    });
+    const parsed = extractJson(String(out?.response ?? ""));
+    captionZh = typeof parsed.caption_zh === "string" ? parsed.caption_zh : "";
+    const zhList = Array.isArray(parsed.image_texts_zh) ? parsed.image_texts_zh : [];
+    slots.forEach((s, i) => {
+      s.text_zh = typeof zhList[i] === "string" ? zhList[i] : "";
+    });
+    seoHook = typeof parsed.seo_hook === "string" ? parsed.seo_hook : "";
+    const tagList = Array.isArray(parsed.seo_hashtags) ? parsed.seo_hashtags : [];
+    seoTags = tagList.filter((t) => typeof t === "string" && t.startsWith("#")).slice(0, 10);
+    if (seoTags.length && !seoTags.includes(mainTag)) seoTags.unshift(mainTag);
+  } catch (e) {
+    warnings.push(`caption/SEO failed: ${String(e?.message || e).slice(0, 120)}`);
+  }
+  try {
+    // Phase 2: segments in small batches. Each batch is independent —
+    // one bad batch doesn't kill the others.
     const SEG_BATCH_CHARS = 200;
     const segBatches = [];
     let cur = [], curLen = 0;
@@ -334,14 +337,18 @@ async function handleTranslate(request, env) {
     }
     if (cur.length) segBatches.push(cur);
     for (let b = 0; b < segBatches.length; b++) {
-      const out = await env.AI.run(TEXT_MODEL, {
-        prompt: buildSegmentsPrompt(segBatches[b]),
-        max_tokens: 2048,
-      });
-      const parsed = extractJson(String(out?.response ?? ""));
-      const segList = Array.isArray(parsed.segments_zh) ? parsed.segments_zh : [];
-      for (const s of segList) {
-        if (s && typeof s.i === "number" && typeof s.text_zh === "string") segByI.set(s.i, s.text_zh);
+      try {
+        const out = await env.AI.run(TEXT_MODEL, {
+          prompt: buildSegmentsPrompt(segBatches[b]),
+          max_tokens: 2048,
+        });
+        const parsed = extractJson(String(out?.response ?? ""));
+        const segList = Array.isArray(parsed.segments_zh) ? parsed.segments_zh : [];
+        for (const s of segList) {
+          if (s && typeof s.i === "number" && typeof s.text_zh === "string") segByI.set(s.i, s.text_zh);
+        }
+      } catch (e) {
+        warnings.push(`segments batch ${b + 1}/${segBatches.length} failed: ${String(e?.message || e).slice(0, 120)}`);
       }
     }
     segmentsZh = inSegs.map((s) => ({ i: s.i, text_zh: segByI.get(s.i) ?? "" }));
