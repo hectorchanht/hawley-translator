@@ -1,5 +1,5 @@
 /**
- * hawley-translator — Cloudflare Worker
+ * news-shorts-maker — Cloudflare Worker
  *
  * Translates Instagram posts (caption + text visible in images) into
  * Traditional Chinese, Hong Kong written style, for the translator fan
@@ -111,7 +111,7 @@ function extractJson(raw) {
 async function ocrImage(env, url) {
   try {
     const res = await fetch(url, {
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; hawley-translator/1.0)" },
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; news-shorts-maker/1.0)" },
     });
     if (!res.ok) return { ok: false, error: `fetch failed: HTTP ${res.status}` };
     const buf = await res.arrayBuffer();
@@ -375,7 +375,7 @@ export default {
     }
     if (request.method === "GET" && url.pathname === "/") {
       return Response.json({
-        name: "hawley-translator",
+        name: "news-shorts-maker",
         usage: "POST /translate with { caption, image_texts: [{url, text_en}], image_urls? }",
       });
     }

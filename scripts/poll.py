@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Poll Instagram source accounts for new posts, translate them via the
-hawley-translator Cloudflare Worker, and queue drafts for HUMAN REVIEW.
+news-shorts-maker Cloudflare Worker, and queue drafts for HUMAN REVIEW.
 
 Sources are configured in SOURCES (--source hawley|trump, default hawley);
 each source gets its own watermark + review-queue state files.

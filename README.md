@@ -1,4 +1,4 @@
-# hawley-translator
+# news-shorts-maker
 
 Multi-source Instagram auto-translation pipeline producing Traditional
 Chinese (Hong Kong style) translations for the translator fan accounts:
@@ -17,7 +17,7 @@ Scope: **post caption + text visible in images**. No video transcription (yet).
 ```
 ┌──────────────────┐      ┌─────────────────────────┐      ┌──────────────────────┐
 │  cron on Linux   │      │  Cloudflare Worker      │      │  human reviewer      │
-│  VM (this repo:  │      │  `hawley-translator`    │      │  (Hector)            │
+│  VM (this repo:  │      │  `news-shorts-maker`    │      │  (Hector)            │
 │  scripts/poll.py)│      │  src/index.js           │      │                      │
 │                  │      │                         │      │  reads               │
 │  1. instagram-cli│ POST │  4. translate caption   │ JSON │  review_queue.json   │
@@ -72,7 +72,7 @@ Cloudflare API tokens do **not** work from the operator VM (all tokens 401
 there) — deploys go through the dashboard, never `wrangler deploy` from here.
 
 1. Cloudflare dashboard → **Workers & Pages** → **Create** → **Connect to Git**.
-2. Select the `hectorchanht/hawley-translator` repo, branch `main`.
+2. Select the `hectorchanht/news-shorts-maker` repo, branch `main`.
 3. Build settings: no build command needed (plain JS worker). The git
    integration auto-deploys on every push to `main`.
 4. Under **Bindings**, confirm the **AI** binding exists (Workers AI).
@@ -88,16 +88,16 @@ python3 -m venv ~/workspace/goals/hawley-ig-auto-translate-bot/.venv-ocr
 ~/workspace/goals/hawley-ig-auto-translate-bot/.venv-ocr/bin/pip install -r scripts/requirements.txt
 
 # every 4 hours: poll, OCR, translate, queue drafts for review
-0 */4 * * * HAWLEY_TRANSLATOR_URL=https://hawley-translator.<acct>.workers.dev \
+0 */4 * * * HAWLEY_TRANSLATOR_URL=https://news-shorts-maker.<acct>.workers.dev \
   ~/workspace/goals/hawley-ig-auto-translate-bot/.venv-ocr/bin/python \
-  /path/to/hawley-translator/scripts/poll.py --source hawley \
+  /path/to/news-shorts-maker/scripts/poll.py --source hawley \
   --state-dir ~/workspace/goals/hawley-ig-auto-translate-bot/hidden_files \
   >> ~/workspace/goals/hawley-ig-auto-translate-bot/hidden_files/poll.log 2>&1
 
 # same for Trump (separate watermark + review queue files per source)
-30 */4 * * * HAWLEY_TRANSLATOR_URL=https://hawley-translator.<acct>.workers.dev \
+30 */4 * * * HAWLEY_TRANSLATOR_URL=https://news-shorts-maker.<acct>.workers.dev \
   ~/workspace/goals/hawley-ig-auto-translate-bot/.venv-ocr/bin/python \
-  /path/to/hawley-translator/scripts/poll.py --source trump \
+  /path/to/news-shorts-maker/scripts/poll.py --source trump \
   --state-dir ~/workspace/goals/hawley-ig-auto-translate-bot/hidden_files \
   >> ~/workspace/goals/hawley-ig-auto-translate-bot/hidden_files/poll_trump.log 2>&1
 ```
